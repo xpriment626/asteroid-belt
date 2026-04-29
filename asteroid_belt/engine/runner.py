@@ -100,13 +100,59 @@ def credit_lp_fees_pro_rata(
     pool: PoolState,
     event: SwapEvent,
 ) -> PositionState:
-    """Credit our position's share of the LP fee from this swap.
+    """Credit our position's share of LP fees from this swap.
 
-    Stubbed in this task. Task 2.5 implements the real pro-rata distribution
-    that respects bin liquidity at swap time (handles JIT-bot fee dilution).
+    Frozen rule. LP fee = (fee_amount - protocol_fee_amount - host_fee_amount).
+    Our share = our position's `liquidity_share` in the swap's bin AT swap time.
+    Fee is credited in input-token units (X if swap_for_y, else Y).
+
+    Multi-bin swaps are handled at the loop level: each bin-crossing event
+    fires this function once with its own `bin_id_after`.
     """
-    del pool, event
-    return position
+    del pool  # bin liquidity is captured in position.composition[bin_id].liquidity_share
+    bin_id = event.bin_id_after
+    if bin_id not in position.composition:
+        return position
+
+    our_share = position.composition[bin_id].liquidity_share
+    if our_share == 0:
+        return position
+
+    lp_fee_total = event.lp_fee_amount  # int
+    our_credit = int(lp_fee_total * our_share)
+    if our_credit == 0:
+        return position
+
+    if event.swap_for_y:
+        # Fee in X
+        new_pending_x = position.fee_pending_x + our_credit
+        new_pending_y = position.fee_pending_y
+        existing_bin = position.fee_pending_per_bin.get(bin_id, (0, 0))
+        new_per_bin = {
+            **position.fee_pending_per_bin,
+            bin_id: (existing_bin[0] + our_credit, existing_bin[1]),
+        }
+    else:
+        # Fee in Y
+        new_pending_x = position.fee_pending_x
+        new_pending_y = position.fee_pending_y + our_credit
+        existing_bin = position.fee_pending_per_bin.get(bin_id, (0, 0))
+        new_per_bin = {
+            **position.fee_pending_per_bin,
+            bin_id: (existing_bin[0], existing_bin[1] + our_credit),
+        }
+
+    return PositionState(
+        lower_bin=position.lower_bin,
+        upper_bin=position.upper_bin,
+        composition=position.composition,
+        fee_pending_x=new_pending_x,
+        fee_pending_y=new_pending_y,
+        fee_pending_per_bin=new_per_bin,
+        total_claimed_x=position.total_claimed_x,
+        total_claimed_y=position.total_claimed_y,
+        fee_owner=position.fee_owner,
+    )
 
 
 def apply_swap_to_pool(*, pool: PoolState, event: SwapEvent) -> PoolState:
