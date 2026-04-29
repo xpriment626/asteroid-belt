@@ -5,14 +5,19 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.10.0
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.7
-          - types-pyyaml
+        # Run mypy from the project venv so it sees polars + pydantic + duckdb
+        # exactly as the codebase does (pre-commit's isolated env can't load
+        # polars cheaply, and we want hook-mypy == project-mypy).
+        name: mypy (project venv)
+        language: system
+        entry: .venv/bin/mypy
+        types: [python]
         files: ^asteroid_belt/
+        pass_filenames: false
+        args: [asteroid_belt]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
