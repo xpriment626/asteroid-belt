@@ -1,5 +1,5 @@
-# Runtime data store
-data/
+# Runtime data store (root-level only; the asteroid_belt/data/ source package must NOT be ignored)
+/data/
 
 # Python
 __pycache__/
