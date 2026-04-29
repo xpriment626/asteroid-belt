@@ -15,17 +15,562 @@
 - Code blocks are intended to be copy-paste-ready; transcribe types and signatures exactly.
 - When a step says "see Task X.Y for pattern", the structure is identical — only the names/types differ.
 
-**Phase summary:**
-- Phase 0: Project skeleton + tooling
-- Phase 1: Pure types + DLMM math (foundation, no I/O)
-- Phase 2: Engine internals (cost, guards, runner) + metrics
-- Phase 3: Strategy ABC + baselines + bar adapter + splits
-- Phase 4: Storage layer + Meteora ingest
-- Phase 5: Config + CLI
-- Phase 6: FastAPI server
-- Phase 7: SvelteKit frontend
-- Phase 8: Integration + regression tests
-- Phase 9: CI + README
+**Phase summary** *(restructured 2026-04-29 mid-execution — see Amendment below):*
+- Phase 0: Project skeleton + tooling ✅
+- Phase 1: Pure types + DLMM math (foundation, no I/O) ✅
+- Phase 2: Engine internals (cost, guards, runner scaffold) + metrics ✅
+- **Phase 3: Adapter + storage + real data flowing + minimal pool-viz frontend** *(restructured)*
+- **Phase 4: HawkFi reverse engineering + full-fidelity engine + 2 baselines** *(new — was old Phase 3.3+3.4)*
+- Phase 5: Config + CLI *(content unchanged from old Phase 5)*
+- Phase 6: FastAPI server — extends Phase 3 MVV with /sessions, /runs, /compare *(slimmed from old Phase 6)*
+- Phase 7: SvelteKit dashboard — extends Phase 3 MVV with run list, run detail, charts, compare *(slimmed from old Phase 7)*
+- Phase 8: Integration + regression tests *(content unchanged from old Phase 8)*
+- Phase 9: CI + README + final sanity *(content unchanged from old Phase 9)*
+
+---
+
+## Amendment 2026-04-29: phase restructure (mid-execution)
+
+After completing Phases 0–2 (65 unit tests, 24 commits on `feat/research-env-v1`), the plan was restructured to (a) decouple plumbing work from research-heavy modelling, (b) make "real data flowing through the stack" a concrete milestone, and (c) get the frontend bones up early so we can stare at real SOL/USDC price action while reverse-engineering HawkFi strategies in Phase 4.
+
+**Key changes:**
+- Old Phase 3 tasks 3.3 (PrecisionCurveStrategy) + 3.4 (MultidayCookUpStrategy) → moved into new Phase 4 (after the engine runner can actually execute their actions).
+- Old Phase 4 (Storage + Meteora ingest) → folded into new Phase 3 as Tasks 3.3 + 3.4. **Phase 4 disappears in the old numbering.**
+- New Phase 3 adds Tasks 3.5 (minimal FastAPI), 3.6 (minimal SvelteKit), 3.7 (e2e verification) — the MVV pool-viz frontend.
+- New Phase 4 adds research tasks (4.1, 4.4) for HawkFi reverse engineering + Task 4.2 to extend the engine runner's `apply_action` for the full action set (the gap I flagged at the end of Phase 2).
+- Old Phase 6 (FastAPI) and Phase 7 (SvelteKit) are slimmed because the bones already ship in Phase 3; they only add the run/session/compare endpoints + pages.
+
+### Task-by-task mapping
+
+**New Phase 3 — Adapter + storage + real data + minimal viz** (7 tasks):
+| New | Source | Notes |
+|-----|--------|-------|
+| 3.1 splits helper | original §3.1 | unchanged |
+| 3.2 bar adapter | original §3.2 | unchanged |
+| 3.3 storage layer (DuckDB + RunStore + parquet writers) | original §4.1 + §4.2 | **merge into single task** |
+| 3.4 Meteora OHLCV ingest of SOL/USDC 10bps | original §4.3 | concrete to pool `BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y` |
+| 3.5 minimal FastAPI (`/health`, `/pools`, `/pools/:addr`, `/pools/:addr/bars`) | original §6.1 + §6.2 + new bars endpoint | **see Amendment §3.5 below for full content** |
+| 3.6 minimal SvelteKit (bootstrap + `/pools/[address]` page with ECharts) | original §7.1 + new pool detail page | **see Amendment §3.6 below for full content** |
+| 3.7 end-to-end verification (real chart in browser) | new | **see Amendment §3.7 below for full content** |
+
+**New Phase 4 — HawkFi reverse engineering + full engine + 2 baselines** (5 tasks):
+| New | Source | Notes |
+|-----|--------|-------|
+| 4.1 Precision Curve research dive | new (research task) | **see Amendment §4.1 below** |
+| 4.2 Extend engine `apply_action` for Rebalance / AddLiquidity / RemoveLiquidity / ClaimFees | new | **see Amendment §4.2 below** |
+| 4.3 PrecisionCurveStrategy | original §3.3 | unchanged in mechanics; now executes against the extended engine from 4.2 |
+| 4.4 Multiday Cook Up research dive | new (research task) | **see Amendment §4.4 below** |
+| 4.5 MultidayCookUpStrategy | original §3.4 | unchanged in mechanics |
+
+**New Phase 5 — Config + CLI:** content unchanged from original §5 (5.1–5.6).
+
+**New Phase 6 — FastAPI extensions:** original §6.1, §6.2 are CONSUMED by Task 3.5. New Phase 6 starts at original §6.3 (/sessions) and includes §6.4 (/runs + trajectory + rebalances + compare).
+
+**New Phase 7 — SvelteKit extensions:** original §7.1 (bootstrap) + the pool detail slice are CONSUMED by Task 3.6. New Phase 7 starts at original §7.2 (API client generation) and includes §7.3–7.8 (run list, run detail header, run charts, compare, sessions/pools list, Playwright smoke).
+
+**New Phase 8 — Integration + regression:** content unchanged from original §8 (8.1–8.5).
+
+**New Phase 9 — CI + README + final sanity:** content unchanged from original §9 (9.1–9.3).
+
+---
+
+## Amendment §3.5 — Minimal FastAPI for Phase 3 MVV
+
+**Files:**
+- Modify: `asteroid_belt/server/app.py`, `asteroid_belt/server/schemas.py`
+- Test: `tests/unit/test_server_health.py`, `tests/unit/test_server_pools.py`, `tests/unit/test_server_bars.py`
+
+This task lands the FastAPI subset needed for the pool-viz frontend: `/health`, `/pools` (list), `/pools/:addr` (detail), `/pools/:addr/bars?start=&end=` (OHLCV slice). Endpoints follow the original §6.1 and §6.2 patterns — see those sections for `build_app` structure and the staged-data fixture pattern.
+
+- [ ] **Step 1: Health endpoint** — implement per original §6.1 (test + impl + commit).
+- [ ] **Step 2: /pools list + detail endpoints** — implement per original §6.2 (test + impl + commit).
+- [ ] **Step 3: /pools/:addr/bars endpoint** — new endpoint not in the original plan.
+
+Test (`tests/unit/test_server_bars.py`):
+
+```python
+import json
+from pathlib import Path
+
+import polars as pl
+import pytest
+from fastapi.testclient import TestClient
+
+from asteroid_belt.server.app import build_app
+
+
+@pytest.fixture
+def staged_bars(tmp_path: Path) -> Path:
+    pool = "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y"
+    pool_dir = tmp_path / "pools" / pool
+    pool_dir.mkdir(parents=True)
+    (pool_dir / "pool_meta.json").write_text(
+        json.dumps({"address": pool, "name": "SOL-USDC"})
+    )
+    # 5 minutes of 1m bars
+    pl.DataFrame(
+        {
+            "ts": [1_700_000_000_000 + i * 60_000 for i in range(5)],
+            "open": [87.0, 87.1, 87.2, 87.3, 87.4],
+            "high": [87.2, 87.3, 87.4, 87.5, 87.6],
+            "low": [86.8, 86.9, 87.0, 87.1, 87.2],
+            "close": [87.1, 87.2, 87.3, 87.4, 87.5],
+            "volume_x": [1000, 1100, 1200, 1300, 1400],
+            "volume_y": [87100, 87200, 87300, 87400, 87500],
+        }
+    ).write_parquet(pool_dir / "bars_1m.parquet")
+    return tmp_path
+
+
+def test_get_bars_full_range(staged_bars: Path) -> None:
+    pool = "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y"
+    client = TestClient(build_app(data_dir=staged_bars))
+    r = client.get(f"/api/v1/pools/{pool}/bars")
+    assert r.status_code == 200
+    bars = r.json()
+    assert len(bars) == 5
+    assert bars[0]["close"] == 87.1
+
+
+def test_get_bars_with_start_end_filter(staged_bars: Path) -> None:
+    pool = "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y"
+    client = TestClient(build_app(data_dir=staged_bars))
+    start = 1_700_000_000_000 + 60_000  # second bar
+    end = 1_700_000_000_000 + 4 * 60_000  # exclude last
+    r = client.get(f"/api/v1/pools/{pool}/bars", params={"start": start, "end": end})
+    assert r.status_code == 200
+    bars = r.json()
+    assert len(bars) == 3  # bars 1, 2, 3 (half-open [start, end))
+
+
+def test_get_bars_404_when_pool_missing(staged_bars: Path) -> None:
+    client = TestClient(build_app(data_dir=staged_bars))
+    r = client.get("/api/v1/pools/nonexistent/bars")
+    assert r.status_code == 404
+```
+
+Schema (`asteroid_belt/server/schemas.py`, add):
+
+```python
+class Bar(BaseModel):
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume_x: int
+    volume_y: int
+```
+
+Endpoint (in `build_app`):
+
+```python
+    from asteroid_belt.server.schemas import Bar
+
+    @app.get("/api/v1/pools/{address}/bars", response_model=list[Bar])
+    def get_bars(
+        address: str,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> list[Bar]:
+        bars_path = data_dir / "pools" / address / "bars_1m.parquet"
+        if not bars_path.exists():
+            raise HTTPException(status_code=404, detail=f"pool {address} not found")
+        df = pl.read_parquet(bars_path)
+        if start is not None:
+            df = df.filter(pl.col("ts") >= start)
+        if end is not None:
+            df = df.filter(pl.col("ts") < end)  # half-open
+        return [Bar(**row) for row in df.iter_rows(named=True)]
+```
+
+Commit: `feat(server): /pools/:addr/bars endpoint with start/end filter`.
+
+---
+
+## Amendment §3.6 — Minimal SvelteKit for Phase 3 MVV
+
+**Files:** as in original §7.1 (bootstrap), plus:
+- Create: `web/src/lib/api/client.ts` (fetch wrapper — typed against `types.ts` once §7.2 lands)
+- Create: `web/src/routes/pools/[address]/+page.ts` (SvelteKit data loader)
+- Create: `web/src/routes/pools/[address]/+page.svelte` (chart page)
+- Create: `web/src/lib/components/PriceChart.svelte` (ECharts wrapper)
+
+- [ ] **Step 1: Bootstrap SvelteKit + Tailwind + Lucide + svelte-echarts** — follow original §7.1 verbatim. The placeholder `/+page.svelte` should redirect to `/pools` since runs don't exist yet:
+
+```svelte
+<!-- web/src/routes/+page.svelte -->
+<script lang="ts">
+  import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
+  onMount(() => goto('/pools'));
+</script>
+```
+
+- [ ] **Step 2: API client (raw fetch; typed in 7.2)**
+
+```typescript
+// web/src/lib/api/client.ts
+const BASE = '/api/v1';
+
+export async function api<T>(path: string): Promise<T> {
+  const r = await fetch(`${BASE}${path}`);
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText} on ${path}`);
+  return (await r.json()) as T;
+}
+
+export type PoolSummary = {
+  address: string;
+  name: string | null;
+  bin_step: number | null;
+  bars_count: number;
+};
+
+export type Bar = {
+  ts: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume_x: number;
+  volume_y: number;
+};
+```
+
+- [ ] **Step 3: Pools list page**
+
+```svelte
+<!-- web/src/routes/pools/+page.svelte -->
+<script lang="ts">
+  import { api, type PoolSummary } from '$lib/api/client';
+  import { onMount } from 'svelte';
+
+  let pools: PoolSummary[] = [];
+  let loading = true;
+  let error: string | null = null;
+
+  onMount(async () => {
+    try {
+      pools = await api<PoolSummary[]>('/pools');
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
+    }
+  });
+</script>
+
+<h2 class="mb-4 text-xl font-bold">Pools</h2>
+{#if loading}
+  <p class="text-fg-muted">Loading...</p>
+{:else if error}
+  <p class="text-red-400">Error: {error}</p>
+{:else if pools.length === 0}
+  <p class="text-fg-muted">No pools ingested yet. Run `make ingest POOL=... START=... END=...`.</p>
+{:else}
+  <ul class="space-y-2">
+    {#each pools as pool}
+      <li>
+        <a href="/pools/{pool.address}"
+           class="block rounded border border-bg-muted bg-bg-surface p-3 hover:border-accent">
+          <div class="font-mono text-sm">{pool.address}</div>
+          <div class="mt-1 text-xs text-fg-muted">
+            {pool.name ?? '—'} · bin_step {pool.bin_step ?? '?'} · {pool.bars_count} bars
+          </div>
+        </a>
+      </li>
+    {/each}
+  </ul>
+{/if}
+```
+
+- [ ] **Step 4: PriceChart component**
+
+```svelte
+<!-- web/src/lib/components/PriceChart.svelte -->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import * as echarts from 'echarts';
+  import type { Bar } from '$lib/api/client';
+
+  export let bars: Bar[] = [];
+  export let holdoutStartMs: number | null = null;
+
+  let el: HTMLDivElement;
+  let chart: echarts.ECharts | null = null;
+
+  function render() {
+    if (!chart || bars.length === 0) return;
+    const data = bars.map((b) => [b.ts, b.close]);
+    const markLines: object[] = [];
+    if (holdoutStartMs !== null) {
+      markLines.push({ xAxis: holdoutStartMs, label: { formatter: 'holdout →' } });
+    }
+    chart.setOption({
+      backgroundColor: 'transparent',
+      grid: { left: 60, right: 24, top: 24, bottom: 40 },
+      xAxis: { type: 'time', axisLine: { lineStyle: { color: '#374151' } } },
+      yAxis: { type: 'value', scale: true, axisLine: { lineStyle: { color: '#374151' } } },
+      tooltip: { trigger: 'axis' },
+      series: [
+        {
+          type: 'line',
+          data,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { color: '#3b82f6', width: 1.5 },
+          markLine: markLines.length
+            ? { data: markLines, lineStyle: { color: '#9ca3af', type: 'dashed' } }
+            : undefined,
+        },
+      ],
+    });
+  }
+
+  onMount(() => {
+    chart = echarts.init(el, 'dark');
+    render();
+    const ro = new ResizeObserver(() => chart?.resize());
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      chart?.dispose();
+    };
+  });
+
+  $: if (chart) render();
+</script>
+
+<div bind:this={el} class="h-96 w-full"></div>
+```
+
+- [ ] **Step 5: Pool detail page**
+
+```typescript
+// web/src/routes/pools/[address]/+page.ts
+import { api, type Bar, type PoolSummary } from '$lib/api/client';
+import type { PageLoad } from './$types';
+
+export const load: PageLoad = async ({ params, fetch: _fetch }) => {
+  const [detail, bars] = await Promise.all([
+    api<PoolSummary>(`/pools/${params.address}`),
+    api<Bar[]>(`/pools/${params.address}/bars`),
+  ]);
+  return { detail, bars };
+};
+```
+
+```svelte
+<!-- web/src/routes/pools/[address]/+page.svelte -->
+<script lang="ts">
+  import PriceChart from '$lib/components/PriceChart.svelte';
+  import type { PageData } from './$types';
+
+  export let data: PageData;
+
+  // Holdout boundary configurable via env later; hard-coded for v1.
+  const HOLDOUT_START_MS = Date.UTC(2025, 10, 1); // Nov 1 2025
+</script>
+
+<header class="mb-4">
+  <h2 class="font-mono text-lg">{data.detail.address}</h2>
+  <div class="mt-1 flex gap-4 text-xs text-fg-muted">
+    <span>{data.detail.name ?? '—'}</span>
+    <span>bin_step {data.detail.bin_step ?? '?'} bps</span>
+    <span>{data.detail.bars_count.toLocaleString()} bars</span>
+  </div>
+</header>
+
+<div class="mb-4 flex gap-2 text-xs">
+  <span class="rounded bg-bg-muted px-2 py-1">
+    Train: May 2024 → Oct 2025
+  </span>
+  <span class="rounded border border-fg-dim px-2 py-1 text-fg-muted">
+    Holdout: Nov 2025 → Apr 2026 (sealed)
+  </span>
+</div>
+
+<PriceChart bars={data.bars} holdoutStartMs={HOLDOUT_START_MS} />
+```
+
+- [ ] **Step 6: Run dev, verify**
+
+```bash
+make dev
+# Browser: http://localhost:5173/pools/BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y
+```
+
+Expected: page renders header + train/holdout chips + a price chart with a vertical dashed line at Nov 1 2025.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add web/
+git commit -m "feat(web): minimal pool detail page with ECharts price chart"
+```
+
+---
+
+## Amendment §3.7 — End-to-end verification
+
+**Goal:** prove the full path from `belt ingest` to "real SOL/USDC chart in browser" works.
+
+This is a manual verification task — no new code to commit unless the smoke check fails.
+
+- [ ] **Step 1: Ingest SOL/USDC 10bps**
+
+```bash
+make ingest POOL=BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y \
+            START=2024-05-01 END=2026-04-29
+```
+
+Expected: log indicates ~24 months of 1m bars written to `data/pools/BGm1tav.../bars_1m.parquet` and metadata to `pool_meta.json`. Plausibly hundreds of thousands of rows.
+
+- [ ] **Step 2: Start API + frontend**
+
+```bash
+make dev  # spawns uvicorn on :8000 and pnpm dev on :5173
+```
+
+- [ ] **Step 3: Open the pool page**
+
+Navigate to `http://localhost:5173/pools/BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y`.
+
+Expected:
+- Header shows the address, "SOL-USDC", `bin_step 10 bps`, ≥500k bars (24 months × ~43k minutes/month)
+- Two chips: train (filled) and holdout (outlined), both labeled with the date ranges
+- Price chart renders a continuous SOL/USDC line over the full window, with a vertical dashed marker at Nov 1 2025
+- Tooltip on hover shows the close price at that timestamp
+
+- [ ] **Step 4: Sanity-check the price values**
+
+Cross-reference 2-3 random points on the chart against [Birdeye](https://birdeye.so/) or another public Solana data source. Differences within fee tier are expected; values that disagree by more than a few percent indicate a problem in ingest.
+
+- [ ] **Step 5: Commit a verification note**
+
+If the smoke check passes, commit a short verification note to record the end-of-phase milestone:
+
+```bash
+echo "Phase 3 e2e verification: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> docs/superpowers/research/phase-3-verified.md
+git add docs/superpowers/research/phase-3-verified.md
+git commit -m "chore: phase 3 e2e verification — real SOL/USDC chart rendered"
+```
+
+If the smoke check fails, **stop and debug before proceeding to Phase 4.** Add a regression test for whichever layer broke (adapter, storage, API, frontend), fix, verify, commit.
+
+---
+
+## Amendment §4.1 — Precision Curve research dive (research task)
+
+**Goal:** produce a written design note documenting how Precision Curve actually behaves, with enough detail to implement `PrecisionCurveStrategy` correctly.
+
+**Files:**
+- Create: `docs/superpowers/research/2026-XX-XX-precision-curve-mechanics.md`
+
+This is **not** a TDD task — it's a research deliverable. No code is committed in this task; the output is the design note.
+
+- [ ] **Step 1: Sources to consult**
+  - HawkFi public docs: strategy templates, FAQ, any Precision Curve marketing material
+  - Meteora docs on DLMM strategy types (Spot / Curve / BidAsk)
+  - GooseDAO posts: search for "Precision Curve" + "concentrated liquidity"
+  - LP Army material (Twitter/Discord/blog) — practitioner-level commentary
+  - On-chain forensics: pull HawkFi user wallets that ran Precision Curve historically (via Helius or Solscan), inspect their position open/close/rebalance txns
+
+- [ ] **Step 2: Questions to answer (every one needs an explicit answer in the doc)**
+  1. **Trigger logic.** When does Precision Curve rebalance? Is it bin-drift-based (active bin moves N bins from position center)? Time-based (every N minutes)? Hybrid?
+  2. **Bin range width.** How wide is the position when opened? Is it fixed (e.g. ±30 bins) or volatility-adaptive?
+  3. **Capital allocation.** What's the X/Y split at open? Always 50/50? Curve-shaped allocation peaking at active bin?
+  4. **Distribution shape.** Spot, Curve, or BidAsk? (Curve is the obvious bet given the name, but worth confirming.)
+  5. **Composition fee tolerance.** Does Precision Curve avoid composition-fee-charging rebalances (only rebalance when adds match the bin ratio)?
+  6. **Stop conditions.** Does it ever close the position outright, or always rebalance into a new range?
+  7. **Compatibility with our deployment stack.** Confirm rebalance cadence is compatible with Railway + Privy + Helius (~1-2s round-trip), not infra-bound like HFL.
+
+- [ ] **Step 3: Deliverable shape**
+
+The doc should have these sections:
+- **Source summary** — what we read, with links
+- **Behaviour model** — explicit answers to all 7 questions above
+- **Implementation contract** — pseudocode for `initialize`, `on_swap`, `on_tick` that an engineer could turn into Python
+- **Open questions / assumptions** — anything we're guessing at, with the impact-if-wrong called out
+- **References** — links
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/superpowers/research/2026-XX-XX-precision-curve-mechanics.md
+git commit -m "research: precision curve mechanics design note"
+```
+
+---
+
+## Amendment §4.2 — Extend engine `apply_action` for full action set
+
+**Goal:** the engine runner currently no-ops on `Rebalance`, `AddLiquidity`, `RemoveLiquidity`, `ClaimFees` (Phase 2 scaffold). Extend it to actually apply those actions to position composition and capital state, so PrecisionCurve and MultidayCookUp can produce correct trajectories.
+
+**Files:**
+- Modify: `asteroid_belt/engine/runner.py` (extend `apply_action`)
+- Test: `tests/unit/test_engine_apply_action.py`
+
+This task is heavy on test design because composition tracking is where engine bugs manifest as silent miscounting. Write generous tests.
+
+- [ ] **Step 1: Test cases (write all, expect FAIL on existing scaffold)**
+
+```python
+# tests/unit/test_engine_apply_action.py
+"""Engine apply_action: full-fidelity composition tracking."""
+
+# Each test case below verifies one transition:
+# - AddLiquidity grows composition (specific bins gain x/y), reduces capital
+# - RemoveLiquidity by bps shrinks composition (proportional), grows capital
+# - Rebalance closes existing range and opens new (composition swap)
+# - ClaimFees zeros fee_pending_{x,y}, grows total_claimed_{x,y}, grows capital
+# - Composition fee on imbalanced add charges expected lamports (cross-check
+#   against engine.cost.composition_fee)
+# - Cap on capital: actions that would require more capital than available
+#   should return position unchanged + reason logged (interaction with guards.py)
+```
+
+Concrete tests to write:
+- `test_add_liquidity_grows_composition`
+- `test_add_liquidity_reduces_capital_by_amount_added`
+- `test_remove_liquidity_shrinks_composition_proportionally`
+- `test_remove_liquidity_grows_capital_by_amount_removed`
+- `test_rebalance_closes_old_opens_new`
+- `test_claim_fees_zeros_pending_grows_claimed`
+- `test_claim_fees_grows_capital_by_pending_amounts`
+- `test_composition_fee_charged_on_imbalanced_add`
+
+- [ ] **Step 2: Implementation strategy**
+
+Extend the `match action:` block in `apply_action`:
+- For each of `Rebalance`, `AddLiquidity`, `RemoveLiquidity`, `ClaimFees`, replace the catch-all no-op branch with real handling that updates `position.composition`, `capital_x`, `capital_y`, and (for Rebalance) appends a `RebalanceRecord` to `rebalance_log`.
+- Use `engine.cost.composition_fee` for adds; subtract the fee from `composition[bin].amount_{x,y}`.
+- For Rebalance, treat as `RemoveLiquidity(full)` followed by `AddLiquidity(adds)`.
+- For ClaimFees, accumulate `fee_pending_{x,y}` into `total_claimed_{x,y}` and into `capital_{x,y}`.
+
+- [ ] **Step 3: Commit**
+
+Each sub-action lands in its own commit (8 small commits, one per test case + impl) for easy reverting if a particular path turns out subtly wrong.
+
+---
+
+## Amendment §4.4 — Multiday Cook Up research dive (research task)
+
+Same shape as §4.1 but for Multiday Cook Up. **Files:** `docs/superpowers/research/2026-XX-XX-multiday-cook-up-mechanics.md`.
+
+Questions to answer (in addition to the 7 from §4.1):
+1. **Cook-up window.** What does "cook up" mean operationally — is it accumulating fees over a multi-day window before claiming, or accumulating into a wider range over time?
+2. **Claim cadence.** Does it claim fees mid-position or only at close?
+3. **Range expansion logic.** Does the position get wider over the multi-day window, or is the range fixed and only the holding period is multi-day?
+4. **Differs from Precision Curve how?** Articulate the explicit delta — these two are paired baselines, the doc should make clear when each is appropriate.
+
+Commit: `research: multiday cook up mechanics design note`.
+
+---
+
+## End of Amendment — original plan body follows
+
+> **Note for executors:** Phases 0–2 in the body below are exact and were executed verbatim. Phase 3 onwards in the body uses the OLD task numbering — refer to the Amendment task-by-task mapping above to know which old sections feed each new task. The task content (test code, impl code, commands) in the body is still correct; only the numbering and grouping changed.
 
 ---
 
