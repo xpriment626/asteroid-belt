@@ -13,6 +13,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Literal
 
+from asteroid_belt.data.adapters.base import SwapEvent
+from asteroid_belt.pool.position_state import PositionState
+from asteroid_belt.pool.state import PoolState
+
 DistributionShape = Literal["spot", "curve", "bid_ask"]
 _VALID_DISTRIBUTIONS: tuple[str, ...] = ("spot", "curve", "bid_ask")
 
@@ -128,13 +132,34 @@ Action = (
 )
 
 
-# --- Strategy ABC (placeholder; implemented in Task 3.1 once PoolState/PositionState exist) ---
+# --- Strategy ABC ---
+
+
+@dataclass(frozen=True)
+class Capital:
+    """Capital available to the strategy at initialize time."""
+
+    x: int  # raw token units
+    y: int
 
 
 class Strategy(ABC):
-    """Strategies override this ABC. Defined here as a placeholder; full
-    interface (initialize/on_swap/on_tick) lands in Task 3.1 once PoolState
-    and PositionState types exist."""
+    """The single mutable surface of the research env.
+
+    Strategies receive read-only snapshots and emit Actions. They have no path
+    to: future events, the adapter, the cost model, the clock outside what's
+    handed in, or the holdout data.
+    """
 
     @abstractmethod
-    def initialize(self, pool: object, capital: object) -> Action: ...
+    def initialize(self, pool: PoolState, capital: Capital) -> Action:
+        """Called once at backtest start. Returns OpenPosition or NoOp."""
+
+    @abstractmethod
+    def on_swap(self, event: SwapEvent, pool: PoolState, position: PositionState) -> Action:
+        """Per-swap decision point. Most strategies return NoOp here."""
+
+    def on_tick(self, ts: int, pool: PoolState, position: PositionState) -> Action:
+        """Optional time-based hook. Default: NoOp."""
+        del ts, pool, position
+        return NoOp()
