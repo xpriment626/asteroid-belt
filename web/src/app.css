@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    background: theme('colors.bg.DEFAULT');
+    color: theme('colors.fg.DEFAULT');
+  }
+  body {
+    @apply font-sans antialiased;
+  }
+  code,
+  pre {
+    @apply font-mono;
+  }
+}
