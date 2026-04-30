@@ -58,7 +58,7 @@ def build_app(*, data_dir: Path | None = None) -> FastAPI:
             if not d.is_dir():
                 continue
             meta_path = d / "pool_meta.json"
-            bars_path = d / "bars_1m.parquet"
+            bars_path = d / "bars_5m.parquet"
             if not meta_path.exists():
                 continue
             meta = json.loads(meta_path.read_text())
@@ -81,7 +81,7 @@ def build_app(*, data_dir: Path | None = None) -> FastAPI:
         if not meta_path.exists():
             raise HTTPException(status_code=404, detail=f"pool {address} not found")
         meta = json.loads(meta_path.read_text())
-        bars_path = pool_dir / "bars_1m.parquet"
+        bars_path = pool_dir / "bars_5m.parquet"
         bars_count = int(pl.read_parquet(bars_path).height) if bars_path.exists() else 0
         return PoolDetail(
             address=address,
@@ -98,7 +98,7 @@ def build_app(*, data_dir: Path | None = None) -> FastAPI:
         end: int | None = None,
     ) -> list[Bar]:
         assert data_dir is not None
-        bars_path = data_dir / "pools" / address / "bars_1m.parquet"
+        bars_path = data_dir / "pools" / address / "bars_5m.parquet"
         if not bars_path.exists():
             raise HTTPException(status_code=404, detail=f"pool {address} not found")
         df = pl.read_parquet(bars_path)

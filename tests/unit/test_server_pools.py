@@ -34,7 +34,7 @@ def staged_data(tmp_path: Path) -> Path:
             "volume_x": [0, 0],
             "volume_y": [0, 0],
         }
-    ).write_parquet(pool_dir / "bars_1m.parquet")
+    ).write_parquet(pool_dir / "bars_5m.parquet")
     return tmp_path
 
 

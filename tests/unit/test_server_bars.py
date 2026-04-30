@@ -25,7 +25,7 @@ def staged_bars(tmp_path: Path) -> Path:
             "volume_x": [1000, 1100, 1200, 1300, 1400],
             "volume_y": [87100, 87200, 87300, 87400, 87500],
         }
-    ).write_parquet(pool_dir / "bars_1m.parquet")
+    ).write_parquet(pool_dir / "bars_5m.parquet")
     return tmp_path
 
 

@@ -4,9 +4,10 @@
 
   export let data: PageData;
 
-  // Holdout boundary: Nov 1 2025 UTC (per spec / data.splits.HOLDOUT_BOUNDARY_DEFAULT).
-  // TODO: read from API once /pools/:addr/detail returns the configured boundary.
-  const HOLDOUT_START_MS = Date.UTC(2025, 10, 1); // month is 0-indexed: 10 = Nov
+  // v0 sealed holdout: last 7 days (Apr 24 - Apr 30 2026). Train+walk-forward
+  // eval covers Dec 1 2025 - Apr 23 2026. Original 18mo/6mo split deferred to
+  // v1 once paid data source unlocks pre-Aug 2025 history.
+  const HOLDOUT_START_MS = Date.UTC(2026, 3, 24); // month 0-indexed: 3 = Apr
 </script>
 
 <header class="mb-4">
@@ -20,10 +21,10 @@
 
 <div class="mb-4 flex gap-2 text-xs">
   <span class="rounded bg-bg-muted px-2 py-1">
-    Train: May 2024 → Oct 2025
+    Train + walk-forward: Dec 2025 → Apr 23 2026
   </span>
   <span class="rounded border border-fg-dim px-2 py-1 text-fg-muted">
-    Holdout: Nov 2025 → Apr 2026 (sealed)
+    Holdout: Apr 24 → Apr 30 2026 (sealed, 1wk)
   </span>
 </div>
 

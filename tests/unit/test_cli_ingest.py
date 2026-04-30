@@ -13,7 +13,18 @@ def test_ingest_invokes_meteora(tmp_path: Path) -> None:
     respx.get(f"https://dlmm.datapi.meteora.ag/pools/{pool}/ohlcv").mock(
         return_value=httpx.Response(
             200,
-            json={"data": [[1_700_000_000, 87.5, 87.6, 87.4, 87.55, 1000, 87550]]},
+            json={
+                "data": [
+                    {
+                        "timestamp": 1_700_000_000,
+                        "open": 87.5,
+                        "high": 87.6,
+                        "low": 87.4,
+                        "close": 87.55,
+                        "volume": 1000.0,
+                    }
+                ]
+            },
         )
     )
     respx.get(f"https://dlmm.datapi.meteora.ag/pools/{pool}").mock(
@@ -36,4 +47,4 @@ def test_ingest_invokes_meteora(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "pools" / pool / "bars_1m.parquet").exists()
+    assert (tmp_path / "pools" / pool / "bars_5m.parquet").exists()
