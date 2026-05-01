@@ -34,6 +34,7 @@ from asteroid_belt.engine.result import (
     BacktestResult,
     RebalanceRecord,
 )
+from asteroid_belt.metrics.primitives import PRIMITIVE_REGISTRY
 from asteroid_belt.pool.fees import evolve_v_params
 from asteroid_belt.pool.position import (
     hodl_value_in_y,
@@ -496,6 +497,7 @@ def _empty_trajectory() -> pl.DataFrame:
             "hodl_value_usd": pl.Series([], dtype=pl.Float64),
             "fees_x_cumulative": pl.Series([], dtype=pl.Int64),
             "fees_y_cumulative": pl.Series([], dtype=pl.Int64),
+            "fees_value_usd": pl.Series([], dtype=pl.Float64),
             "il_cumulative": pl.Series([], dtype=pl.Float64),
             "in_range": pl.Series([], dtype=pl.Boolean),
             "capital_idle_usd": pl.Series([], dtype=pl.Float64),
@@ -615,6 +617,11 @@ def run_backtest(
             fees_y_cumulative = 0
             in_range = False
 
+        fees_value_usd = float(
+            (Decimal(fees_x_cumulative) / Decimal(10) ** config.decimals_x) * price
+            + (Decimal(fees_y_cumulative) / Decimal(10) ** config.decimals_y)
+        )
+
         hodl_value_usd = float(
             hodl_value_in_y(
                 initial_x=config.initial_x,
@@ -638,6 +645,7 @@ def run_backtest(
                 "hodl_value_usd": hodl_value_usd,
                 "fees_x_cumulative": fees_x_cumulative,
                 "fees_y_cumulative": fees_y_cumulative,
+                "fees_value_usd": fees_value_usd,
                 "il_cumulative": il_cumulative,
                 "in_range": in_range,
                 "capital_idle_usd": capital_idle_usd,
@@ -647,8 +655,23 @@ def run_backtest(
     ended_at = int(time.time() * 1000)
     trajectory = pl.DataFrame(trajectory_rows) if trajectory_rows else _empty_trajectory()
 
-    # Primitives are computed in Phase 2 metrics tasks; for the scaffold, return zeros.
-    primitives = {config.selection_metric: 0.0}
+    # Build a partial result so PRIMITIVE_REGISTRY functions can read trajectory
+    # + rebalances. Score is filled in after primitives are computed.
+    partial = BacktestResult(
+        run_id=config.run_id,
+        config_hash=config.config_hash,
+        schema_version="1.0",
+        started_at=started_at,
+        ended_at=ended_at,
+        status="ok",
+        trajectory=trajectory,
+        rebalances=rebalances,
+        primitives={},
+        score=0.0,
+        score_metric=config.selection_metric,
+    )
+    primitives = {name: fn(partial) for name, fn in PRIMITIVE_REGISTRY.items()}
+    score = primitives.get(config.selection_metric, 0.0)
 
     return BacktestResult(
         run_id=config.run_id,
@@ -660,6 +683,6 @@ def run_backtest(
         trajectory=trajectory,
         rebalances=rebalances,
         primitives=primitives,
-        score=0.0,
+        score=score,
         score_metric=config.selection_metric,
     )

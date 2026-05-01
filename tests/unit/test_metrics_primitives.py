@@ -2,12 +2,16 @@ import polars as pl
 
 from asteroid_belt.engine.result import BacktestResult, RebalanceRecord
 from asteroid_belt.metrics.primitives import (
+    calmar,
     capital_efficiency,
+    info_ratio_vs_hodl,
+    net_fee_yield,
     net_pnl,
     rebalance_count,
     sharpe,
     sortino,
     time_in_range_pct,
+    vol_capture,
 )
 
 
@@ -17,6 +21,8 @@ def _make_result(
     hodl_values: list[float],
     in_range_flags: list[bool],
     rebalances: int = 0,
+    fees_values: list[float] | None = None,
+    prices: list[float] | None = None,
 ) -> BacktestResult:
     n = len(position_values)
     # One row per UTC day so sharpe/sortino's daily aggregation has multiple data points.
@@ -24,12 +30,13 @@ def _make_result(
     df = pl.DataFrame(
         {
             "ts": [i * day_ms for i in range(n)],
-            "price": [1.0] * n,
+            "price": prices if prices is not None else [1.0] * n,
             "active_bin": [0] * n,
             "position_value_usd": position_values,
             "hodl_value_usd": hodl_values,
             "fees_x_cumulative": [0] * n,
             "fees_y_cumulative": [0] * n,
+            "fees_value_usd": fees_values if fees_values is not None else [0.0] * n,
             "il_cumulative": [p - h for p, h in zip(position_values, hodl_values, strict=False)],
             "in_range": in_range_flags,
             "capital_idle_usd": [0.0] * n,
@@ -143,3 +150,83 @@ def test_rebalance_count() -> None:
         rebalances=5,
     )
     assert rebalance_count(r) == 5
+
+
+def test_info_ratio_vs_hodl_zero_when_position_tracks_hodl() -> None:
+    r = _make_result(
+        position_values=[100, 101, 102, 103],
+        hodl_values=[100, 101, 102, 103],
+        in_range_flags=[True] * 4,
+    )
+    assert info_ratio_vs_hodl(r) == 0.0
+
+
+def test_info_ratio_vs_hodl_positive_when_outperforming() -> None:
+    # Position consistently beats HODL day-over-day with non-zero variance.
+    r = _make_result(
+        position_values=[100, 102, 105, 109],
+        hodl_values=[100, 100, 100, 100],
+        in_range_flags=[True] * 4,
+    )
+    assert info_ratio_vs_hodl(r) > 0.0
+
+
+def test_net_fee_yield_zero_with_no_fees() -> None:
+    r = _make_result(
+        position_values=[100, 100],
+        hodl_values=[100, 100],
+        in_range_flags=[True, True],
+    )
+    assert net_fee_yield(r) == 0.0
+
+
+def test_net_fee_yield_annualized_apr() -> None:
+    # 1.0 fee on 100 initial over 1 day -> 1% daily -> 365% APR.
+    r = _make_result(
+        position_values=[100, 100],
+        hodl_values=[100, 100],
+        in_range_flags=[True, True],
+        fees_values=[0.0, 1.0],
+    )
+    assert abs(net_fee_yield(r) - 3.65) < 1e-6
+
+
+def test_calmar_zero_when_flat() -> None:
+    r = _make_result(
+        position_values=[100, 100, 100],
+        hodl_values=[100, 100, 100],
+        in_range_flags=[True, True, True],
+    )
+    assert calmar(r) == 0.0
+
+
+def test_calmar_positive_when_growth_with_drawdown() -> None:
+    # Growth from 100 -> 110 with a dip to 95 -> finite calmar.
+    r = _make_result(
+        position_values=[100, 95, 105, 110],
+        hodl_values=[100, 100, 100, 100],
+        in_range_flags=[True] * 4,
+    )
+    assert calmar(r) > 0.0
+
+
+def test_vol_capture_zero_with_constant_price() -> None:
+    r = _make_result(
+        position_values=[100, 100, 100, 100],
+        hodl_values=[100, 100, 100, 100],
+        in_range_flags=[True] * 4,
+        fees_values=[0.0, 0.5, 1.0, 1.5],
+    )
+    # Constant price -> realized vol = 0 -> vol_capture = 0.
+    assert vol_capture(r) == 0.0
+
+
+def test_vol_capture_positive_when_fees_accrue_with_vol() -> None:
+    r = _make_result(
+        position_values=[100, 100, 100, 100],
+        hodl_values=[100, 100, 100, 100],
+        in_range_flags=[True] * 4,
+        fees_values=[0.0, 0.5, 1.0, 1.5],
+        prices=[1.0, 1.05, 0.98, 1.02],
+    )
+    assert vol_capture(r) > 0.0
