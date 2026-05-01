@@ -26,20 +26,28 @@ from asteroid_belt.data.adapters.base import (
     TimeTick,
     TimeWindow,
 )
+from asteroid_belt.engine.composition import distribute
+from asteroid_belt.engine.cost import composition_fee
 from asteroid_belt.engine.guards import validate_action
 from asteroid_belt.engine.result import (
     BacktestResult,
     RebalanceRecord,
 )
 from asteroid_belt.pool.fees import evolve_v_params
-from asteroid_belt.pool.position_state import PositionState
+from asteroid_belt.pool.position_state import BinComposition, PositionState
 from asteroid_belt.pool.state import PoolState
 from asteroid_belt.strategies.base import (
     Action,
+    AddLiquidity,
+    BinRangeAdd,
+    BinRangeRemoval,
     Capital,
+    ClaimFees,
     ClosePosition,
     NoOp,
     OpenPosition,
+    Rebalance,
+    RemoveLiquidity,
     Strategy,
 )
 
@@ -175,6 +183,136 @@ def apply_swap_to_pool(*, pool: PoolState, event: SwapEvent) -> PoolState:
     )
 
 
+def _replace_position(
+    position: PositionState,
+    *,
+    lower_bin: int | None = None,
+    upper_bin: int | None = None,
+    composition: dict[int, BinComposition] | None = None,
+    fee_pending_x: int | None = None,
+    fee_pending_y: int | None = None,
+    fee_pending_per_bin: dict[int, tuple[int, int]] | None = None,
+    total_claimed_x: int | None = None,
+    total_claimed_y: int | None = None,
+) -> PositionState:
+    """Functional update of a frozen PositionState. Local helper to keep
+    apply_action branches readable."""
+    return PositionState(
+        lower_bin=lower_bin if lower_bin is not None else position.lower_bin,
+        upper_bin=upper_bin if upper_bin is not None else position.upper_bin,
+        composition=composition if composition is not None else position.composition,
+        fee_pending_x=fee_pending_x if fee_pending_x is not None else position.fee_pending_x,
+        fee_pending_y=fee_pending_y if fee_pending_y is not None else position.fee_pending_y,
+        fee_pending_per_bin=(
+            fee_pending_per_bin if fee_pending_per_bin is not None else position.fee_pending_per_bin
+        ),
+        total_claimed_x=(
+            total_claimed_x if total_claimed_x is not None else position.total_claimed_x
+        ),
+        total_claimed_y=(
+            total_claimed_y if total_claimed_y is not None else position.total_claimed_y
+        ),
+        fee_owner=position.fee_owner,
+    )
+
+
+def _apply_remove(
+    position: PositionState,
+    removal: BinRangeRemoval,
+) -> tuple[PositionState, int, int]:
+    """Shrink composition in [lower, upper] by bps; return (new_position, removed_x, removed_y).
+
+    v0: liquidity_share scales by the same bps fraction. Real share-tracking would
+    require knowing pool's per-bin total liquidity which the bar adapter doesn't
+    reconstruct precisely; deferred to v1. Pending fees are NOT touched —
+    Meteora's raw removeLiquidity doesn't claim.
+    """
+    new_comp = dict(position.composition)
+    removed_x_total = 0
+    removed_y_total = 0
+    keep = (10_000 - removal.bps) / 10_000  # for liquidity_share scaling (float)
+    for bin_id in range(removal.lower_bin, removal.upper_bin + 1):
+        bc = new_comp.get(bin_id)
+        if bc is None:
+            continue
+        rem_x = bc.amount_x * removal.bps // 10_000
+        rem_y = bc.amount_y * removal.bps // 10_000
+        removed_x_total += rem_x
+        removed_y_total += rem_y
+        new_comp[bin_id] = BinComposition(
+            amount_x=bc.amount_x - rem_x,
+            amount_y=bc.amount_y - rem_y,
+            liquidity_share=bc.liquidity_share * keep,
+        )
+    return _replace_position(position, composition=new_comp), removed_x_total, removed_y_total
+
+
+def _apply_add(
+    position: PositionState,
+    add: BinRangeAdd,
+    *,
+    pool: PoolState,
+    base_fee_rate_bps: int,
+) -> tuple[PositionState, int, int]:
+    """Grow composition with the per-bin distribution; return (new_position, fee_x, fee_y).
+
+    Composition fee is charged only on the active bin's "wrong-side" portion
+    (per cost.composition_fee). Other bins hold pure-X (above active) or pure-Y
+    (below active), so any add lands at the bin's existing token-zero ratio
+    and incurs no fee.
+
+    Returned fee_x, fee_y are total composition fees burned (already deducted
+    from the composition amounts).
+    """
+    per_bin = distribute(
+        amount_x=add.amount_x,
+        amount_y=add.amount_y,
+        lower_bin=add.lower_bin,
+        upper_bin=add.upper_bin,
+        active_bin=pool.active_bin,
+        distribution=add.distribution,
+    )
+
+    new_comp = dict(position.composition)
+    total_fee_x = 0
+    total_fee_y = 0
+
+    for bin_id, (add_x, add_y) in per_bin.items():
+        existing = new_comp.get(bin_id)
+        bin_total_x = existing.amount_x if existing else 0
+        bin_total_y = existing.amount_y if existing else 0
+
+        # Composition fee only on the active bin (only place a non-zero
+        # ratio mismatch can arise — non-active bins are single-token).
+        fee_x = 0
+        fee_y = 0
+        if bin_id == pool.active_bin:
+            fee_x, fee_y = composition_fee(
+                added_x=add_x,
+                added_y=add_y,
+                bin_total_x=bin_total_x,
+                bin_total_y=bin_total_y,
+                base_fee_rate_bps=base_fee_rate_bps,
+            )
+            total_fee_x += fee_x
+            total_fee_y += fee_y
+
+        # Net amount that lands in the bin (after fee burn)
+        net_x = add_x - fee_x
+        net_y = add_y - fee_y
+
+        new_amount_x = bin_total_x + net_x
+        new_amount_y = bin_total_y + net_y
+        # v0 share: 1.0 (we treat ourselves as the only LP).
+        new_comp[bin_id] = BinComposition(
+            amount_x=new_amount_x,
+            amount_y=new_amount_y,
+            liquidity_share=1.0,
+        )
+
+    return _replace_position(position, composition=new_comp), total_fee_x, total_fee_y
+
+
 def apply_action(
     *,
     action: Action,
@@ -187,15 +325,22 @@ def apply_action(
 ) -> tuple[PositionState | None, int, int]:
     """Apply an action to position state, returning new (position, cap_x, cap_y).
 
-    Stubbed for v1 scaffold: only OpenPosition / ClosePosition / NoOp
-    transition state. Full action application lands incrementally in Phase 3
-    as strategies and adapters are integrated.
+    Composition tracking is the bug-prone surface — see test_engine_apply_action
+    for the contract each branch must satisfy.
     """
-    del pool, rebalance_log, event_ts  # unused in scaffold
+    # Meteora: base_fee_rate (in fee_precision=1e9 units) = base_factor * bin_step * 10.
+    # Convert to bps: base_fee_rate / 1e9 * 1e4 = base_fee_rate / 1e5.
+    # → base_fee_bps = base_factor * bin_step // 10_000.
+    base_fee_bps = pool.static_fee.base_factor * pool.bin_step // 10_000
     match action:
         case NoOp():
             return position, capital_x, capital_y
+
         case OpenPosition(lower_bin=lo, upper_bin=hi):
+            # Position open is a state allocator only; subsequent AddLiquidity
+            # actually deposits the capital. The strategy that returns
+            # OpenPosition is expected to follow up with AddLiquidity unless
+            # it intentionally wants an empty position.
             new_position = PositionState(
                 lower_bin=lo,
                 upper_bin=hi,
@@ -208,10 +353,118 @@ def apply_action(
                 fee_owner=None,
             )
             return new_position, capital_x, capital_y
+
         case ClosePosition():
-            return None, capital_x, capital_y
+            if position is None:
+                return None, capital_x, capital_y
+            # Refund composition + pending fees to capital.
+            refund_x = sum(c.amount_x for c in position.composition.values())
+            refund_x += position.fee_pending_x
+            refund_y = sum(c.amount_y for c in position.composition.values())
+            refund_y += position.fee_pending_y
+            return None, capital_x + refund_x, capital_y + refund_y
+
+        case ClaimFees():
+            if position is None:
+                return None, capital_x, capital_y
+            new_capital_x = capital_x + position.fee_pending_x
+            new_capital_y = capital_y + position.fee_pending_y
+            new_pos = _replace_position(
+                position,
+                fee_pending_x=0,
+                fee_pending_y=0,
+                fee_pending_per_bin={},
+                total_claimed_x=position.total_claimed_x + position.fee_pending_x,
+                total_claimed_y=position.total_claimed_y + position.fee_pending_y,
+            )
+            return new_pos, new_capital_x, new_capital_y
+
+        case AddLiquidity(
+            bin_range=(lo, hi),
+            distribution=dist,
+            amount_x=ax,
+            amount_y=ay,
+        ):
+            if position is None:
+                return None, capital_x, capital_y
+            add = BinRangeAdd(
+                lower_bin=lo,
+                upper_bin=hi,
+                distribution=dist,
+                amount_x=ax,
+                amount_y=ay,
+            )
+            new_pos, _fee_x, _fee_y = _apply_add(
+                position, add, pool=pool, base_fee_rate_bps=base_fee_bps
+            )
+            # Capital deduction is by the full added amount; the composition fee
+            # comes out of the deposited tokens themselves (Meteora semantics).
+            return new_pos, capital_x - ax, capital_y - ay
+
+        case RemoveLiquidity(bin_range=(lo, hi), bps=bps):
+            if position is None:
+                return None, capital_x, capital_y
+            removal = BinRangeRemoval(lower_bin=lo, upper_bin=hi, bps=bps)
+            new_pos, removed_x, removed_y = _apply_remove(position, removal)
+            return new_pos, capital_x + removed_x, capital_y + removed_y
+
+        case Rebalance(removes=removes, adds=adds):
+            if position is None:
+                return None, capital_x, capital_y
+            current = position
+            # 1) Apply all removes (returns capital).
+            removed_x_total = 0
+            removed_y_total = 0
+            for r in removes:
+                current, rx, ry = _apply_remove(current, r)
+                removed_x_total += rx
+                removed_y_total += ry
+            cap_x = capital_x + removed_x_total
+            cap_y = capital_y + removed_y_total
+
+            # 2) Apply all adds (consumes capital, accrues composition fees).
+            comp_fee_x = 0
+            comp_fee_y = 0
+            adds_total_x = 0
+            adds_total_y = 0
+            for a in adds:
+                current, fx, fy = _apply_add(current, a, pool=pool, base_fee_rate_bps=base_fee_bps)
+                comp_fee_x += fx
+                comp_fee_y += fy
+                adds_total_x += a.amount_x
+                adds_total_y += a.amount_y
+            cap_x -= adds_total_x
+            cap_y -= adds_total_y
+
+            # 3) Range envelope expands to encompass all add ranges.
+            new_lower = current.lower_bin
+            new_upper = current.upper_bin
+            for a in adds:
+                new_lower = min(new_lower, a.lower_bin)
+                new_upper = max(new_upper, a.upper_bin)
+            if new_lower != current.lower_bin or new_upper != current.upper_bin:
+                current = _replace_position(current, lower_bin=new_lower, upper_bin=new_upper)
+
+            # 4) Log the rebalance.
+            rebalance_log.append(
+                RebalanceRecord(
+                    ts=event_ts,
+                    trigger="strategy",
+                    old_lower_bin=position.lower_bin,
+                    old_upper_bin=position.upper_bin,
+                    new_lower_bin=current.lower_bin,
+                    new_upper_bin=current.upper_bin,
+                    gas_lamports=0,  # gas accounted at run-config layer; v0 stub
+                    composition_fee_x=comp_fee_x,
+                    composition_fee_y=comp_fee_y,
+                    fees_claimed_x=0,
+                    fees_claimed_y=0,
+                )
+            )
+            return current, cap_x, cap_y
+
         case _:
-            # Other actions are no-ops in the scaffold.
+            # Defensive — unknown action types become no-ops.
             return position, capital_x, capital_y
 
 
