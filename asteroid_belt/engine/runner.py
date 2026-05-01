@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import Decimal
 from heapq import merge
 
 import polars as pl
@@ -34,6 +35,11 @@ from asteroid_belt.engine.result import (
     RebalanceRecord,
 )
 from asteroid_belt.pool.fees import evolve_v_params
+from asteroid_belt.pool.position import (
+    hodl_value_in_y,
+    il_vs_hodl,
+    position_value_in_y,
+)
 from asteroid_belt.pool.position_state import BinComposition, PositionState
 from asteroid_belt.pool.state import PoolState
 from asteroid_belt.strategies.base import (
@@ -579,19 +585,62 @@ def run_backtest(
             event_ts=event.ts,
         )
 
-        # Append trajectory row (stub values — Phase 3+ fills in real numbers).
+        price = pool.mid_price
+        if position is not None:
+            position_value_usd = float(
+                position_value_in_y(
+                    composition=position.composition,
+                    price=price,
+                    decimals_x=config.decimals_x,
+                    decimals_y=config.decimals_y,
+                )
+            )
+            il_cumulative = float(
+                il_vs_hodl(
+                    composition=position.composition,
+                    initial_x=config.initial_x,
+                    initial_y=config.initial_y,
+                    price=price,
+                    decimals_x=config.decimals_x,
+                    decimals_y=config.decimals_y,
+                )
+            )
+            fees_x_cumulative = position.total_claimed_x + position.fee_pending_x
+            fees_y_cumulative = position.total_claimed_y + position.fee_pending_y
+            in_range = position.in_range(pool.active_bin)
+        else:
+            position_value_usd = 0.0
+            il_cumulative = 0.0
+            fees_x_cumulative = 0
+            fees_y_cumulative = 0
+            in_range = False
+
+        hodl_value_usd = float(
+            hodl_value_in_y(
+                initial_x=config.initial_x,
+                initial_y=config.initial_y,
+                price=price,
+                decimals_x=config.decimals_x,
+                decimals_y=config.decimals_y,
+            )
+        )
+        capital_idle_usd = float(
+            (Decimal(capital_x) / Decimal(10) ** config.decimals_x) * price
+            + (Decimal(capital_y) / Decimal(10) ** config.decimals_y)
+        )
+
         trajectory_rows.append(
             {
                 "ts": event.ts,
-                "price": float(pool.mid_price),
+                "price": float(price),
                 "active_bin": pool.active_bin,
-                "position_value_usd": 0.0,
-                "hodl_value_usd": 0.0,
-                "fees_x_cumulative": 0,
-                "fees_y_cumulative": 0,
-                "il_cumulative": 0.0,
-                "in_range": position.in_range(pool.active_bin) if position is not None else False,
-                "capital_idle_usd": 0.0,
+                "position_value_usd": position_value_usd,
+                "hodl_value_usd": hodl_value_usd,
+                "fees_x_cumulative": fees_x_cumulative,
+                "fees_y_cumulative": fees_y_cumulative,
+                "il_cumulative": il_cumulative,
+                "in_range": in_range,
+                "capital_idle_usd": capital_idle_usd,
             }
         )
 
