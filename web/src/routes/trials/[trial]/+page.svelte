@@ -2,7 +2,8 @@
   import { api, type IterationDetail, type IterationSummary, type TrajectoryRow } from '$lib/api/client';
   import EquityChart from '$lib/components/EquityChart.svelte';
   import IterationLeaderboard from '$lib/components/IterationLeaderboard.svelte';
-  import { ArrowLeft, AlertTriangle, Trophy } from 'lucide-svelte';
+  import DeployModal from '$lib/components/DeployModal.svelte';
+  import { ArrowLeft, AlertTriangle, Trophy, Rocket } from 'lucide-svelte';
   import type { PageData } from './$types';
 
   export let data: PageData;
@@ -14,6 +15,7 @@
   let detail: IterationDetail | null = null;
   let trajectory: TrajectoryRow[] = [];
   let detailErr: string | null = null;
+  let showDeploy = false;
 
   async function loadIter(n: number) {
     detail = null;
@@ -121,6 +123,13 @@
           <div class="mb-1 text-xs font-medium text-rose-300">Traceback</div>
           <pre class="overflow-x-auto whitespace-pre-wrap break-all text-xs text-rose-200/80">{detail.error}</pre>
         </div>
+      {:else}
+        <button
+          on:click={() => (showDeploy = true)}
+          class="mb-3 flex items-center gap-1.5 rounded border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/20"
+        >
+          <Rocket size={12} /> Deploy live (devnet)
+        </button>
       {/if}
 
       <details class="text-xs" open={detail.error === null}>
@@ -150,4 +159,13 @@
       {/if}
     </div>
   </div>
+{/if}
+
+{#if showDeploy && detail !== null}
+  <DeployModal
+    trial={data.trial.trial}
+    iteration={detail.iteration}
+    strategySummary={`score ${detail.score?.toFixed(2) ?? '—'} (${detail.score_metric})`}
+    on:close={() => (showDeploy = false)}
+  />
 {/if}

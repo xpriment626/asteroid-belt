@@ -119,3 +119,30 @@ class RunStatus(BaseModel):
     started_at: int
     ended_at: int | None
     error: str | None
+
+
+class BuildActionRequest(BaseModel):
+    """Translate an iteration's strategy.initialize() action to live bin numbers.
+
+    The frontend supplies the live pool's active_bin + bin_step (read via the
+    Meteora SDK browser-side) and the user's chosen amounts. The server runs
+    `strategy.initialize(pool, capital)` against a PoolState pinned at that
+    active bin, returning the resulting OpenPosition.
+    """
+
+    active_bin: int
+    bin_step: int
+    initial_x: int
+    initial_y: int
+    decimals_x: int = 9  # SOL default; frontend can override for other pools
+    decimals_y: int = 6  # USDC default
+
+
+class BuildActionResponse(BaseModel):
+    """Resolved OpenPosition from a strategy's initialize() — ready for tx-build."""
+
+    action_type: str  # "open_position" | "no_op"
+    lower_bin: int | None
+    upper_bin: int | None
+    distribution: str | None
+    error: str | None

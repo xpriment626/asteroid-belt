@@ -165,3 +165,131 @@ def test_404s(tmp_path: Path) -> None:
     assert c.get("/api/v1/trials/missing").status_code == 404
     assert c.get("/api/v1/trials/missing/iterations/0").status_code == 404
     assert c.get("/api/v1/trials/missing/iterations/0/trajectory").status_code == 404
+
+
+_OPEN_30_CURVE_CODE = """
+class MyStrategy(Strategy):
+    def initialize(self, pool, capital):
+        return OpenPosition(
+            lower_bin=pool.active_bin - 30,
+            upper_bin=pool.active_bin + 30,
+            distribution="curve",
+        )
+    def on_swap(self, event, pool, position):
+        return NoOp()
+"""
+
+
+def _write_iteration_with_code(
+    trial_dir: Path,
+    *,
+    iteration: int,
+    code: str,
+    error: str | None = None,
+) -> None:
+    payload = {
+        "iteration": iteration,
+        "timestamp": 1_700_000_000_000 + iteration,
+        "code_hash": "z" * 12,
+        "score": 100.0 if error is None else float("-inf"),
+        "score_metric": "vol_capture",
+        "primitives": {"vol_capture": 100.0} if error is None else {},
+        "rebalance_count": 0,
+        "error": error,
+        "strategy_code": code,
+        "has_trajectory": False,
+    }
+    base = trial_dir / f"{iteration:04d}_zzzzzzzzzzzz"
+    base.with_suffix(".json").write_text(json.dumps(payload))
+
+
+def test_build_action_returns_open_position_centered_on_active_bin(tmp_path: Path) -> None:
+    results_root = tmp_path / "agent_results"
+    data_dir = tmp_path / "data"
+    (data_dir / "pools").mkdir(parents=True)
+    results_root.mkdir()
+    trial_dir = results_root / "demo"
+    trial_dir.mkdir()
+    _write_iteration_with_code(trial_dir, iteration=0, code=_OPEN_30_CURVE_CODE)
+
+    app = build_app(data_dir=data_dir, results_root=results_root)
+    c = TestClient(app)
+
+    r = c.post(
+        "/api/v1/trials/demo/iterations/0/build-action",
+        json={
+            "active_bin": 1234,
+            "bin_step": 10,
+            "initial_x": 100_000_000,
+            "initial_y": 1_000_000,
+        },
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["action_type"] == "open_position"
+    assert j["lower_bin"] == 1204
+    assert j["upper_bin"] == 1264
+    assert j["distribution"] == "curve"
+    assert j["error"] is None
+
+
+def test_build_action_rejects_errored_iteration(tmp_path: Path) -> None:
+    results_root = tmp_path / "agent_results"
+    data_dir = tmp_path / "data"
+    (data_dir / "pools").mkdir(parents=True)
+    results_root.mkdir()
+    trial_dir = results_root / "demo"
+    trial_dir.mkdir()
+    _write_iteration_with_code(
+        trial_dir, iteration=1, code=_OPEN_30_CURVE_CODE, error="TypeError: bad"
+    )
+
+    app = build_app(data_dir=data_dir, results_root=results_root)
+    c = TestClient(app)
+    r = c.post(
+        "/api/v1/trials/demo/iterations/1/build-action",
+        json={
+            "active_bin": 0,
+            "bin_step": 10,
+            "initial_x": 0,
+            "initial_y": 0,
+        },
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["action_type"] == "error"
+    assert "errored" in (j["error"] or "")
+
+
+def test_build_action_returns_no_op_when_strategy_returns_noop(tmp_path: Path) -> None:
+    """Degenerate iterations whose initialize() returns NoOp can't be deployed."""
+    results_root = tmp_path / "agent_results"
+    data_dir = tmp_path / "data"
+    (data_dir / "pools").mkdir(parents=True)
+    results_root.mkdir()
+    trial_dir = results_root / "demo"
+    trial_dir.mkdir()
+    noop_code = """
+class MyStrategy(Strategy):
+    def initialize(self, pool, capital):
+        return NoOp()
+    def on_swap(self, event, pool, position):
+        return NoOp()
+"""
+    _write_iteration_with_code(trial_dir, iteration=2, code=noop_code)
+
+    app = build_app(data_dir=data_dir, results_root=results_root)
+    c = TestClient(app)
+    r = c.post(
+        "/api/v1/trials/demo/iterations/2/build-action",
+        json={
+            "active_bin": 0,
+            "bin_step": 10,
+            "initial_x": 100,
+            "initial_y": 100,
+        },
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["action_type"] == "no_op"
+    assert j["lower_bin"] is None

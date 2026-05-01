@@ -19,6 +19,8 @@ import polars as pl
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from asteroid_belt.server.schemas import (
+    BuildActionRequest,
+    BuildActionResponse,
     IterationDetail,
     IterationSummary,
     RunStartRequest,
@@ -197,6 +199,93 @@ def build_router(*, results_root: Path, data_dir: Path) -> APIRouter:
         raise HTTPException(
             status_code=404,
             detail=f"trajectory for iteration {iteration} in trial {trial} not found",
+        )
+
+    @router.post(
+        "/trials/{trial}/iterations/{iteration}/build-action",
+        response_model=BuildActionResponse,
+    )
+    def build_action(trial: str, iteration: int, req: BuildActionRequest) -> BuildActionResponse:
+        """Run a stored iteration's strategy.initialize() against a live pool.
+
+        Lets the frontend translate the strategy's "open at active ± half" intent
+        to actual bin numbers on whatever pool the user is deploying to (devnet
+        or otherwise). Returns the resolved OpenPosition action — frontend
+        passes those bins to the Meteora SDK to build the on-chain tx.
+        """
+        d = _trial_dir(results_root, trial)
+        if not d.exists():
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found")
+        match = next(d.glob(f"{iteration:04d}_*.json"), None)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"iteration {iteration} not found in trial {trial}",
+            )
+        payload = json.loads(match.read_text())
+        if payload.get("error"):
+            return BuildActionResponse(
+                action_type="error",
+                lower_bin=None,
+                upper_bin=None,
+                distribution=None,
+                error="cannot deploy an iteration that errored during scoring",
+            )
+
+        # Lazy imports — keep the trial-listing path light.
+        from decimal import Decimal
+
+        from asteroid_belt.agent.tools import _exec_strategy_code
+        from asteroid_belt.pool.state import (
+            PoolState,
+            StaticFeeParams,
+            VolatilityState,
+        )
+        from asteroid_belt.strategies.base import Capital, OpenPosition
+
+        try:
+            cls = _exec_strategy_code(str(payload["strategy_code"]))
+            strategy = cls()
+            # Build a PoolState pinned to the live pool's active bin. Static-fee
+            # params here mirror our test fixture for SOL/USDC 10bps; they only
+            # affect what the strategy sees during init, not what tx we'll build.
+            pool = PoolState(
+                active_bin=req.active_bin,
+                bin_step=req.bin_step,
+                mid_price=Decimal("1"),  # strategies don't typically read this in initialize
+                volatility=VolatilityState(0, 0, 0, 0),
+                static_fee=StaticFeeParams(10000, 30, 600, 5000, 40000, 500, 350000),
+                bin_liquidity={},
+                last_swap_ts=0,
+                reward_infos=[],
+            )
+            action = strategy.initialize(pool, Capital(x=req.initial_x, y=req.initial_y))
+        except Exception as exc:
+            return BuildActionResponse(
+                action_type="error",
+                lower_bin=None,
+                upper_bin=None,
+                distribution=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        if isinstance(action, OpenPosition):
+            return BuildActionResponse(
+                action_type="open_position",
+                lower_bin=action.lower_bin,
+                upper_bin=action.upper_bin,
+                distribution=action.distribution,
+                error=None,
+            )
+        return BuildActionResponse(
+            action_type="no_op",
+            lower_bin=None,
+            upper_bin=None,
+            distribution=None,
+            error=(
+                "strategy.initialize() returned a non-OpenPosition action — "
+                "cannot build a deploy tx for it"
+            ),
         )
 
     @router.post("/runs/start", response_model=RunStatus)
