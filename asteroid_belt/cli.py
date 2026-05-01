@@ -44,5 +44,45 @@ def ingest(pool: str, start: str, end: str, data_dir: str) -> None:
     click.echo(f"ingested {pool} for [{start}, {end}] -> {out_dir / pool}")
 
 
+@cli.command()
+@click.option("--pool", required=True)
+@click.option("--budget", type=int, default=10)
+@click.option("--objective", default="vol_capture")
+@click.option("--trial", required=True)
+@click.option("--data-dir", default="data", type=click.Path(exists=True))
+@click.option("--initial-x", type=int, default=10_000_000_000)
+@click.option("--initial-y", type=int, default=1_000_000_000)
+@click.option("--window-start-ms", type=int, default=None)
+@click.option("--window-end-ms", type=int, default=None)
+@click.pass_context
+def agent(
+    ctx: click.Context,
+    pool: str,
+    budget: int,
+    objective: str,
+    trial: str,
+    data_dir: str,
+    initial_x: int,
+    initial_y: int,
+    window_start_ms: int | None,
+    window_end_ms: int | None,
+) -> None:
+    """Run the autoresearch tournament loop."""
+    from asteroid_belt.agent.run import main as agent_main
+
+    ctx.invoke(
+        agent_main,
+        pool=pool,
+        budget=budget,
+        objective=objective,
+        trial=trial,
+        data_dir=data_dir,
+        initial_x=initial_x,
+        initial_y=initial_y,
+        window_start_ms=window_start_ms,
+        window_end_ms=window_end_ms,
+    )
+
+
 if __name__ == "__main__":
     cli()
