@@ -336,12 +336,12 @@ def apply_action(
         case NoOp():
             return position, capital_x, capital_y
 
-        case OpenPosition(lower_bin=lo, upper_bin=hi):
-            # Position open is a state allocator only; subsequent AddLiquidity
-            # actually deposits the capital. The strategy that returns
-            # OpenPosition is expected to follow up with AddLiquidity unless
-            # it intentionally wants an empty position.
-            new_position = PositionState(
+        case OpenPosition(lower_bin=lo, upper_bin=hi, distribution=dist):
+            # Open allocates the bin range AND deposits all available capital
+            # using the chosen distribution. v0 simplification: capital_x_pct
+            # (intended for SDK-side autoFill swap) is ignored — the position
+            # opens with whatever ratio the strategy passes in via Capital.
+            empty_position = PositionState(
                 lower_bin=lo,
                 upper_bin=hi,
                 composition={},
@@ -352,7 +352,19 @@ def apply_action(
                 total_claimed_y=0,
                 fee_owner=None,
             )
-            return new_position, capital_x, capital_y
+            if capital_x == 0 and capital_y == 0:
+                return empty_position, 0, 0
+            initial_add = BinRangeAdd(
+                lower_bin=lo,
+                upper_bin=hi,
+                distribution=dist,
+                amount_x=capital_x,
+                amount_y=capital_y,
+            )
+            new_position, _fx, _fy = _apply_add(
+                empty_position, initial_add, pool=pool, base_fee_rate_bps=base_fee_bps
+            )
+            return new_position, 0, 0
 
         case ClosePosition():
             if position is None:

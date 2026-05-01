@@ -23,6 +23,7 @@ from asteroid_belt.strategies.base import (
     BinRangeAdd,
     BinRangeRemoval,
     ClaimFees,
+    OpenPosition,
     Rebalance,
     RemoveLiquidity,
 )
@@ -67,6 +68,51 @@ def _position(
         total_claimed_y=total_claimed_y,
         fee_owner=None,
     )
+
+
+# --- OpenPosition (deposit) ---
+
+
+def test_open_position_deposits_all_capital_into_composition() -> None:
+    """OpenPosition opens the range AND deposits all available capital."""
+    new_pos, new_x, new_y = apply_action(
+        action=OpenPosition(lower_bin=-2, upper_bin=2, distribution="spot"),
+        pool=_pool(active_bin=0),
+        position=None,
+        capital_x=1_000,
+        capital_y=1_000,
+        rebalance_log=[],
+        event_ts=0,
+    )
+    assert new_pos is not None
+    assert new_pos.lower_bin == -2
+    assert new_pos.upper_bin == 2
+    # All capital deployed (composition fee on active bin against an empty bin = 0)
+    total_x = sum(c.amount_x for c in new_pos.composition.values())
+    total_y = sum(c.amount_y for c in new_pos.composition.values())
+    assert total_x == 1_000
+    assert total_y == 1_000
+    assert new_x == 0
+    assert new_y == 0
+
+
+def test_open_position_with_zero_capital_yields_empty_composition() -> None:
+    """OpenPosition with no capital allocates the range but composition stays empty."""
+    new_pos, new_x, new_y = apply_action(
+        action=OpenPosition(lower_bin=0, upper_bin=10, distribution="curve"),
+        pool=_pool(active_bin=0),
+        position=None,
+        capital_x=0,
+        capital_y=0,
+        rebalance_log=[],
+        event_ts=0,
+    )
+    assert new_pos is not None
+    assert new_pos.lower_bin == 0
+    assert new_pos.upper_bin == 10
+    assert new_pos.composition == {}
+    assert new_x == 0
+    assert new_y == 0
 
 
 # --- ClaimFees ---
