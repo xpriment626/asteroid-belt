@@ -6,7 +6,7 @@
   $: pathname = $page.url.pathname;
 
   const nav = [
-    { href: '/',         label: 'Runs',     icon: Activity },
+    { href: '/trials',   label: 'Runs',     icon: Activity },
     { href: '/compare',  label: 'Compare',  icon: GitCompareArrows },
     { href: '/sessions', label: 'Sessions', icon: FlaskConical },
     { href: '/pools',    label: 'Pools',    icon: Database },

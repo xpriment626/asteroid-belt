@@ -89,7 +89,7 @@ def extract_python(text: str) -> str:
     return m.group(1).strip() if m else text.strip()
 
 
-@dataclass(frozen=True)
+@dataclass
 class ExperimentResult:
     iteration: int
     timestamp: int
@@ -100,6 +100,7 @@ class ExperimentResult:
     primitives: dict[str, float]
     rebalance_count: int
     error: str | None
+    trajectory: pl.DataFrame | None = None  # not in the JSON; persisted as parquet
 
 
 def _exec_strategy_code(code: str) -> type[Strategy]:
@@ -192,6 +193,7 @@ def run_candidate(
             primitives=dict(result.primitives),
             rebalance_count=len(result.rebalances),
             error=None,
+            trajectory=result.trajectory,
         )
     except Exception as exc:
         return ExperimentResult(
@@ -208,9 +210,10 @@ def run_candidate(
 
 
 def save_experiment(result: ExperimentResult, *, results_dir: Path) -> Path:
-    """Persist one experiment as `<iter>_<hash>.json` and return the path."""
+    """Persist one experiment as `<iter>_<hash>.json` (+ trajectory parquet if present)."""
     results_dir.mkdir(parents=True, exist_ok=True)
-    path = results_dir / f"{result.iteration:04d}_{result.code_hash}.json"
+    base = results_dir / f"{result.iteration:04d}_{result.code_hash}"
+    path = base.with_suffix(".json")
     payload = {
         "iteration": result.iteration,
         "timestamp": result.timestamp,
@@ -221,9 +224,17 @@ def save_experiment(result: ExperimentResult, *, results_dir: Path) -> Path:
         "rebalance_count": result.rebalance_count,
         "error": result.error,
         "strategy_code": result.strategy_code,
+        "has_trajectory": result.trajectory is not None and not result.trajectory.is_empty(),
     }
     path.write_text(json.dumps(payload, indent=2))
+    if result.trajectory is not None and not result.trajectory.is_empty():
+        result.trajectory.write_parquet(base.with_suffix(".parquet"))
     return path
+
+
+def trajectory_path_for(results_dir: Path, *, iteration: int, code_hash: str) -> Path:
+    """Path where a saved iteration's trajectory parquet lives."""
+    return results_dir / f"{iteration:04d}_{code_hash}.parquet"
 
 
 def load_history(results_dir: Path) -> list[dict[str, Any]]:

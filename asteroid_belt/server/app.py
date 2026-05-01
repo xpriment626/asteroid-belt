@@ -24,13 +24,21 @@ from asteroid_belt.server.schemas import (
     PoolDetail,
     PoolSummary,
 )
+from asteroid_belt.server.trials import build_router as build_trials_router
 
 
-def build_app(*, data_dir: Path | None = None) -> FastAPI:
+def build_app(
+    *,
+    data_dir: Path | None = None,
+    results_root: Path | None = None,
+) -> FastAPI:
     """Build a FastAPI app pointed at `data_dir`. Tests pass tmp_path here."""
     if data_dir is None:
         env = os.environ.get("ASTEROID_BELT_DATA_DIR", "data")
         data_dir = Path(env)
+    if results_root is None:
+        env_r = os.environ.get("ASTEROID_BELT_AGENT_RESULTS", "agent/results")
+        results_root = Path(env_r)
 
     app = FastAPI(
         title="asteroid-belt API",
@@ -40,8 +48,14 @@ def build_app(*, data_dir: Path | None = None) -> FastAPI:
         openapi_url="/api/v1/openapi.json",
     )
 
-    # Stash data_dir on the app for endpoint handlers
+    # Stash dirs on the app for endpoint handlers
     app.state.data_dir = data_dir
+    app.state.results_root = results_root
+
+    app.include_router(
+        build_trials_router(results_root=results_root, data_dir=data_dir),
+        prefix="/api/v1",
+    )
 
     @app.get("/api/v1/health", response_model=HealthResponse)
     def health() -> HealthResponse:
