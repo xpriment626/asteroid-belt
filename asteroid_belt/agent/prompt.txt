@@ -12,7 +12,8 @@ The block MUST define:
         ...
 
 No prose outside the fence. No imports — the runtime pre-injects all the
-names listed below into your namespace.
+names listed below into your namespace, plus `Decimal` (pool.mid_price is
+a Decimal — compute against it directly) and `math` (for sqrt, log, exp).
 
 # STRATEGY CONTRACT
 
@@ -43,23 +44,28 @@ You inherit from `Strategy` (an ABC) and implement these methods:
 - NoOp()
     Do nothing this step.
 
-- OpenPosition(lower_bin: int, upper_bin: int, distribution: str)
+- OpenPosition(lower_bin: int, upper_bin: int, distribution: str,
+               capital_x_pct: float | None = None, slippage_bps: int = 50)
     Open a fresh position spanning [lower_bin, upper_bin]. distribution is
     one of "spot" | "curve" | "bid_ask". Capital is auto-deposited in full
     using the chosen distribution. ONLY VALID FROM `initialize`.
 
-- AddLiquidity(adds: list[BinRangeAdd])
-    Deposit additional capital into one or more bin ranges of an existing
-    position. BinRangeAdd(lower_bin, upper_bin, distribution, amount_x, amount_y).
+- AddLiquidity(bin_range: tuple[int, int], distribution: str,
+               amount_x: int, amount_y: int)
+    Deposit additional capital into ONE bin range of an existing position.
     Subject to composition fee on imbalanced adds at the active bin.
+    Note: bin_range is a (lo, hi) tuple, NOT separate lower_bin/upper_bin.
 
-- RemoveLiquidity(removes: list[BinRangeRemoval])
-    Withdraw a fraction (bps; 10_000 = 100%) from one or more bin ranges.
+- RemoveLiquidity(bin_range: tuple[int, int], bps: int)
+    Withdraw a fraction (bps; 10_000 = 100%) from ONE bin range.
+    bin_range is a (lo, hi) tuple.
+
+- Rebalance(removes: list[BinRangeRemoval], adds: list[BinRangeAdd],
+            max_active_bin_slippage: int = 0)
+    Atomic multi-range remove + add (this IS the multi-range action). Use
+    to reshape your range. Composition fees apply on imbalanced re-adds.
     BinRangeRemoval(lower_bin, upper_bin, bps).
-
-- Rebalance(removes: list[BinRangeRemoval], adds: list[BinRangeAdd])
-    Atomic remove + add. Use this to reshape your range. Composition fees
-    apply on imbalanced re-adds.
+    BinRangeAdd(lower_bin, upper_bin, distribution, amount_x, amount_y).
 
 - ClaimFees()
     Claim pending fees (moves `fee_pending_*` into `total_claimed_*`).

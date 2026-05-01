@@ -109,7 +109,10 @@ def _exec_strategy_code(code: str) -> type[Strategy]:
     code can `from asteroid_belt.strategies.base import ...` OR rely on
     pre-injected names.
     """
+    import math as _math
+
     injected = {
+        # Strategy ABC + actions
         "Strategy": strategy_base.Strategy,
         "Capital": strategy_base.Capital,
         "OpenPosition": strategy_base.OpenPosition,
@@ -121,6 +124,9 @@ def _exec_strategy_code(code: str) -> type[Strategy]:
         "NoOp": strategy_base.NoOp,
         "BinRangeAdd": strategy_base.BinRangeAdd,
         "BinRangeRemoval": strategy_base.BinRangeRemoval,
+        # Stdlib helpers strategies commonly need
+        "Decimal": Decimal,  # pool.mid_price is a Decimal — strategies often compute against it
+        "math": _math,
     }
     namespace: dict[str, Any] = {"__builtins__": __builtins__, **injected}
     exec(code, namespace)
