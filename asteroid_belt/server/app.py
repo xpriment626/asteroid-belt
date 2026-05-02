@@ -25,20 +25,29 @@ from asteroid_belt.server.schemas import (
     PoolSummary,
 )
 from asteroid_belt.server.trials import build_router as build_trials_router
+from asteroid_belt.store.agent_runs import default_db_path
+from asteroid_belt.store.runs import DuckDBRunStore, RunStore
 
 
 def build_app(
     *,
     data_dir: Path | None = None,
-    results_root: Path | None = None,
+    store: RunStore | None = None,
 ) -> FastAPI:
-    """Build a FastAPI app pointed at `data_dir`. Tests pass tmp_path here."""
+    """Build a FastAPI app pointed at `data_dir`. Tests pass tmp_path here.
+
+    When `store` is omitted, opens (and lazily inits) the project-default
+    DuckDB store at `<data_dir>/asteroid_belt.duckdb`.
+    """
     if data_dir is None:
         env = os.environ.get("ASTEROID_BELT_DATA_DIR", "data")
         data_dir = Path(env)
-    if results_root is None:
-        env_r = os.environ.get("ASTEROID_BELT_AGENT_RESULTS", "agent/results")
-        results_root = Path(env_r)
+    runs_dir = data_dir / "runs"
+
+    if store is None:
+        db_path = default_db_path(data_dir)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = DuckDBRunStore(db_path=db_path)
 
     app = FastAPI(
         title="asteroid-belt API",
@@ -48,12 +57,12 @@ def build_app(
         openapi_url="/api/v1/openapi.json",
     )
 
-    # Stash dirs on the app for endpoint handlers
     app.state.data_dir = data_dir
-    app.state.results_root = results_root
+    app.state.runs_dir = runs_dir
+    app.state.store = store
 
     app.include_router(
-        build_trials_router(results_root=results_root, data_dir=data_dir),
+        build_trials_router(store=store, data_dir=data_dir, runs_dir=runs_dir),
         prefix="/api/v1",
     )
 

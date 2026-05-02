@@ -62,6 +62,17 @@ class SessionRecord:
     notes: str | None = None
 
 
+@dataclass
+class ArtifactRecord:
+    """Mirrors the `run_artifacts` table schema."""
+
+    run_id: str
+    kind: str
+    path: str
+    sha256: str | None = None
+    bytes: int | None = None
+
+
 class RunStore(Protocol):
     """The seam: v1 = DuckDBRunStore. v2+ implementations swap in here."""
 
@@ -75,6 +86,9 @@ class RunStore(Protocol):
         self, session_id: str, *, closed_at: int, outcome_json: dict[str, Any] | None
     ) -> None: ...
     def get_session(self, session_id: str) -> SessionRecord: ...
+    def list_sessions(self, *, kind: str | None = None) -> list[SessionRecord]: ...
+    def insert_artifact(self, artifact: ArtifactRecord) -> None: ...
+    def query_artifacts(self, run_id: str) -> list[ArtifactRecord]: ...
 
 
 class DuckDBRunStore:
@@ -250,6 +264,41 @@ class DuckDBRunStore:
         ).fetchone()
         if row is None:
             raise KeyError(session_id)
+        return self._row_to_session(row)
+
+    def list_sessions(self, *, kind: str | None = None) -> list[SessionRecord]:
+        sql = (
+            "SELECT session_id, label, created_at, closed_at, session_kind, "
+            "goal_json, outcome_json, notes FROM sessions"
+        )
+        values: list[Any] = []
+        if kind is not None:
+            sql += " WHERE session_kind = ?"
+            values.append(kind)
+        sql += " ORDER BY created_at DESC"
+        rows = self._con.execute(sql, values).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def insert_artifact(self, artifact: ArtifactRecord) -> None:
+        # `bytes` is reserved-word-adjacent in some SQL dialects but DuckDB takes
+        # it without quoting; still use plain identifier ordering.
+        self._con.execute(
+            "INSERT INTO run_artifacts (run_id, kind, path, sha256, bytes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [artifact.run_id, artifact.kind, artifact.path, artifact.sha256, artifact.bytes],
+        )
+
+    def query_artifacts(self, run_id: str) -> list[ArtifactRecord]:
+        rows = self._con.execute(
+            "SELECT run_id, kind, path, sha256, bytes FROM run_artifacts WHERE run_id = ?",
+            [run_id],
+        ).fetchall()
+        return [
+            ArtifactRecord(run_id=r[0], kind=r[1], path=r[2], sha256=r[3], bytes=r[4]) for r in rows
+        ]
+
+    @staticmethod
+    def _row_to_session(row: tuple[Any, ...]) -> SessionRecord:
         return SessionRecord(
             session_id=row[0],
             label=row[1],

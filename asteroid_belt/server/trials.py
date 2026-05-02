@@ -1,13 +1,12 @@
-"""Trial / iteration / run endpoints.
+"""Trial / iteration / run endpoints — backed by the DuckDB run store.
 
-Reads the agent's flat-file output at `<results_root>/<trial>/<iter>_<hash>.{json,parquet}`.
-Trial persistence is intentionally file-based for the demo (see checkpoint
-2026-05-01); migration to a real DB is a post-demo concern.
+Reads agent iterations from the `runs` + `run_artifacts` tables via
+`store.agent_runs`. Response shapes are unchanged from the demo's flat-file
+era so the frontend client doesn't move.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import traceback
@@ -29,29 +28,23 @@ from asteroid_belt.server.schemas import (
     TrialDetail,
     TrialSummary,
 )
+from asteroid_belt.store.agent_runs import (
+    AgentIterationPayload,
+    ensure_agent_session,
+    get_iteration_payload,
+    get_iteration_trajectory,
+    list_agent_trials,
+    list_iteration_payloads,
+    record_agent_iteration,
+)
+from asteroid_belt.store.runs import RunStore
 
 # In-process store of currently-active runs. Keyed by run_id; values are
-# RunStatus dataclasses we mutate on the worker thread. Demo-only — would
-# be a redis hash / db row in production.
+# RunStatus dataclasses we mutate on the worker thread. Demo-grade — v2
+# moves this to a redis hash / dedicated DB table once we need
+# multi-worker / restart-safety.
 _RUNS: dict[str, RunStatus] = {}
 _RUNS_LOCK = threading.Lock()
-
-
-def _trial_dir(results_root: Path, trial: str) -> Path:
-    return results_root / trial
-
-
-def _iteration_payloads(trial_dir: Path) -> list[dict[str, Any]]:
-    if not trial_dir.exists():
-        return []
-    payloads: list[dict[str, Any]] = []
-    for p in sorted(trial_dir.glob("*.json")):
-        try:
-            payloads.append(json.loads(p.read_text()))
-        except (json.JSONDecodeError, OSError):
-            continue
-    payloads.sort(key=lambda d: int(d.get("iteration", 0)))
-    return payloads
 
 
 def _short_error(msg: str | None) -> str | None:
@@ -74,102 +67,99 @@ def _safe_score(raw: Any) -> float | None:
     return v
 
 
-def _summarize_trial(trial: str, payloads: list[dict[str, Any]]) -> TrialSummary:
+def _summarize_trial(trial: str, payloads: list[AgentIterationPayload]) -> TrialSummary:
     iteration_count = len(payloads)
-    success = [p for p in payloads if p.get("error") is None]
-    errors = [p for p in payloads if p.get("error") is not None]
-    degenerate = [p for p in success if float(p.get("score", 0.0)) == 0.0]
-    best: dict[str, Any] | None = None
+    success = [p for p in payloads if p.error is None]
+    errors = [p for p in payloads if p.error is not None]
+    degenerate = [p for p in success if (p.score or 0.0) == 0.0]
+    best: AgentIterationPayload | None = None
     if success:
-        best = max(success, key=lambda p: float(p.get("score", float("-inf"))))
-    timestamps = [int(p.get("timestamp", 0)) for p in payloads if p.get("timestamp")]
+        best = max(success, key=lambda p: p.score if p.score is not None else float("-inf"))
+    timestamps = [p.timestamp for p in payloads if p.timestamp]
     return TrialSummary(
         trial=trial,
         iteration_count=iteration_count,
         success_count=len(success),
         error_count=len(errors),
         degenerate_count=len(degenerate),
-        best_iteration=int(best["iteration"]) if best else None,
-        best_score=_safe_score(best["score"]) if best else None,
-        score_metric=str(best["score_metric"]) if best else None,
+        best_iteration=best.iteration if best else None,
+        best_score=_safe_score(best.score) if best else None,
+        score_metric=best.score_metric if best else None,
         started_at=min(timestamps) if timestamps else None,
         last_updated=max(timestamps) if timestamps else None,
     )
 
 
-def _to_iteration_summary(payload: dict[str, Any]) -> IterationSummary:
+def _to_iteration_summary(payload: AgentIterationPayload) -> IterationSummary:
     return IterationSummary(
-        iteration=int(payload["iteration"]),
-        timestamp=int(payload.get("timestamp", 0)),
-        code_hash=str(payload.get("code_hash", "")),
-        score=_safe_score(payload.get("score")),
-        score_metric=str(payload.get("score_metric", "")),
-        rebalance_count=int(payload.get("rebalance_count", 0)),
-        error=_short_error(payload.get("error")),
-        has_trajectory=bool(payload.get("has_trajectory", False)),
+        iteration=payload.iteration,
+        timestamp=payload.timestamp,
+        code_hash=payload.code_hash,
+        score=_safe_score(payload.score),
+        score_metric=payload.score_metric,
+        rebalance_count=payload.rebalance_count,
+        error=_short_error(payload.error),
+        has_trajectory=payload.has_trajectory,
         primitives={
             k: v
-            for k, v in ((k, _safe_score(v)) for k, v in (payload.get("primitives") or {}).items())
+            for k, v in ((k, _safe_score(v)) for k, v in payload.primitives.items())
             if v is not None
         },
     )
 
 
-def build_router(*, results_root: Path, data_dir: Path) -> APIRouter:
-    """FastAPI router for trial endpoints. Tests can pass a tmp results_root."""
+def build_router(*, store: RunStore, data_dir: Path, runs_dir: Path) -> APIRouter:
+    """FastAPI router for trial endpoints. Tests pass a tmp store + dirs."""
     router = APIRouter()
 
     @router.get("/trials", response_model=list[TrialSummary])
     def list_trials() -> list[TrialSummary]:
-        if not results_root.exists():
-            return []
         out: list[TrialSummary] = []
-        for d in sorted(results_root.iterdir()):
-            if not d.is_dir():
-                continue
-            payloads = _iteration_payloads(d)
-            out.append(_summarize_trial(d.name, payloads))
+        for sess in list_agent_trials(store):
+            payloads = list_iteration_payloads(store, trial=sess.session_id)
+            out.append(_summarize_trial(sess.session_id, payloads))
         # Most-recently-touched trials first.
         out.sort(key=lambda s: s.last_updated or 0, reverse=True)
         return out
 
     @router.get("/trials/{trial}", response_model=TrialDetail)
     def get_trial(trial: str) -> TrialDetail:
-        d = _trial_dir(results_root, trial)
-        if not d.exists():
-            raise HTTPException(status_code=404, detail=f"trial {trial} not found")
-        payloads = _iteration_payloads(d)
+        try:
+            store.get_session(trial)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
+        payloads = list_iteration_payloads(store, trial=trial)
         summary = _summarize_trial(trial, payloads)
         iterations = [_to_iteration_summary(p) for p in payloads]
         return TrialDetail(**summary.model_dump(), iterations=iterations)
 
     @router.get("/trials/{trial}/iterations/{iteration}", response_model=IterationDetail)
     def get_iteration(trial: str, iteration: int) -> IterationDetail:
-        d = _trial_dir(results_root, trial)
-        if not d.exists():
-            raise HTTPException(status_code=404, detail=f"trial {trial} not found")
-        for p in d.glob(f"{iteration:04d}_*.json"):
-            payload = json.loads(p.read_text())
-            return IterationDetail(
-                iteration=int(payload["iteration"]),
-                timestamp=int(payload.get("timestamp", 0)),
-                code_hash=str(payload.get("code_hash", "")),
-                score=_safe_score(payload.get("score")),
-                score_metric=str(payload.get("score_metric", "")),
-                rebalance_count=int(payload.get("rebalance_count", 0)),
-                error=payload.get("error"),  # full traceback on detail endpoint
-                has_trajectory=bool(payload.get("has_trajectory", False)),
-                primitives={
-                    k: v
-                    for k, v in (
-                        (k, _safe_score(v)) for k, v in (payload.get("primitives") or {}).items()
-                    )
-                    if v is not None
-                },
-                strategy_code=str(payload.get("strategy_code", "")),
+        try:
+            store.get_session(trial)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
+        payload = get_iteration_payload(store, trial=trial, iteration=iteration)
+        if payload is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"iteration {iteration} not found in trial {trial}",
             )
-        raise HTTPException(
-            status_code=404, detail=f"iteration {iteration} not found in trial {trial}"
+        return IterationDetail(
+            iteration=payload.iteration,
+            timestamp=payload.timestamp,
+            code_hash=payload.code_hash,
+            score=_safe_score(payload.score),
+            score_metric=payload.score_metric,
+            rebalance_count=payload.rebalance_count,
+            error=payload.error,  # full traceback on detail endpoint
+            has_trajectory=payload.has_trajectory,
+            primitives={
+                k: v
+                for k, v in ((k, _safe_score(v)) for k, v in payload.primitives.items())
+                if v is not None
+            },
+            strategy_code=payload.strategy_code,
         )
 
     @router.get(
@@ -177,53 +167,48 @@ def build_router(*, results_root: Path, data_dir: Path) -> APIRouter:
         response_model=list[TrajectoryRow],
     )
     def get_trajectory(trial: str, iteration: int) -> list[TrajectoryRow]:
-        d = _trial_dir(results_root, trial)
-        if not d.exists():
-            raise HTTPException(status_code=404, detail=f"trial {trial} not found")
-        for p in d.glob(f"{iteration:04d}_*.parquet"):
-            df = pl.read_parquet(p)
-            return [
-                TrajectoryRow(
-                    ts=int(row["ts"]),
-                    price=float(row["price"]),
-                    active_bin=int(row["active_bin"]),
-                    position_value_usd=float(row["position_value_usd"]),
-                    hodl_value_usd=float(row["hodl_value_usd"]),
-                    fees_value_usd=float(row["fees_value_usd"]),
-                    il_cumulative=float(row["il_cumulative"]),
-                    in_range=bool(row["in_range"]),
-                    capital_idle_usd=float(row["capital_idle_usd"]),
-                )
-                for row in df.iter_rows(named=True)
-            ]
-        raise HTTPException(
-            status_code=404,
-            detail=f"trajectory for iteration {iteration} in trial {trial} not found",
-        )
+        try:
+            store.get_session(trial)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
+        df = get_iteration_trajectory(store, trial=trial, iteration=iteration)
+        if df is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"trajectory for iteration {iteration} in trial {trial} not found",
+            )
+        return [
+            TrajectoryRow(
+                ts=int(row["ts"]),
+                price=float(row["price"]),
+                active_bin=int(row["active_bin"]),
+                position_value_usd=float(row["position_value_usd"]),
+                hodl_value_usd=float(row["hodl_value_usd"]),
+                fees_value_usd=float(row["fees_value_usd"]),
+                il_cumulative=float(row["il_cumulative"]),
+                in_range=bool(row["in_range"]),
+                capital_idle_usd=float(row["capital_idle_usd"]),
+            )
+            for row in df.iter_rows(named=True)
+        ]
 
     @router.post(
         "/trials/{trial}/iterations/{iteration}/build-action",
         response_model=BuildActionResponse,
     )
     def build_action(trial: str, iteration: int, req: BuildActionRequest) -> BuildActionResponse:
-        """Run a stored iteration's strategy.initialize() against a live pool.
-
-        Lets the frontend translate the strategy's "open at active ± half" intent
-        to actual bin numbers on whatever pool the user is deploying to (devnet
-        or otherwise). Returns the resolved OpenPosition action — frontend
-        passes those bins to the Meteora SDK to build the on-chain tx.
-        """
-        d = _trial_dir(results_root, trial)
-        if not d.exists():
-            raise HTTPException(status_code=404, detail=f"trial {trial} not found")
-        match = next(d.glob(f"{iteration:04d}_*.json"), None)
-        if match is None:
+        """Run a stored iteration's strategy.initialize() against a live pool."""
+        try:
+            store.get_session(trial)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
+        payload = get_iteration_payload(store, trial=trial, iteration=iteration)
+        if payload is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"iteration {iteration} not found in trial {trial}",
             )
-        payload = json.loads(match.read_text())
-        if payload.get("error"):
+        if payload.error:
             return BuildActionResponse(
                 action_type="error",
                 lower_bin=None,
@@ -244,15 +229,12 @@ def build_router(*, results_root: Path, data_dir: Path) -> APIRouter:
         from asteroid_belt.strategies.base import Capital, OpenPosition
 
         try:
-            cls = _exec_strategy_code(str(payload["strategy_code"]))
+            cls = _exec_strategy_code(payload.strategy_code)
             strategy = cls()
-            # Build a PoolState pinned to the live pool's active bin. Static-fee
-            # params here mirror our test fixture for SOL/USDC 10bps; they only
-            # affect what the strategy sees during init, not what tx we'll build.
             pool = PoolState(
                 active_bin=req.active_bin,
                 bin_step=req.bin_step,
-                mid_price=Decimal("1"),  # strategies don't typically read this in initialize
+                mid_price=Decimal("1"),
                 volatility=VolatilityState(0, 0, 0, 0),
                 static_fee=StaticFeeParams(10000, 30, 600, 5000, 40000, 500, 350000),
                 bin_liquidity={},
@@ -317,23 +299,26 @@ def build_router(*, results_root: Path, data_dir: Path) -> APIRouter:
             objective=req.objective,
             initial_x=req.initial_x,
             initial_y=req.initial_y,
+            store=store,
+            runs_dir=runs_dir,
         )
         return status
 
     @router.get("/runs/{run_id}", response_model=RunStatus)
     def get_run(run_id: str) -> RunStatus:
         with _RUNS_LOCK:
-            status = _RUNS.get(run_id)
-        if status is None:
+            current = _RUNS.get(run_id)
+        if current is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        # Iterations land on disk while the worker is busy; reflect that here.
-        with _RUNS_LOCK:
-            current = _RUNS[run_id]
-            if current.state == "running":
-                trial_dir = _trial_dir(Path("agent/results"), current.trial)
-                current.iterations_completed = (
-                    len(list(trial_dir.glob("*.json"))) if trial_dir.exists() else 0
-                )
+        # Iterations land in DB while the worker is busy; reflect that here.
+        if current.state == "running":
+            try:
+                payloads = list_iteration_payloads(store, trial=current.trial)
+                with _RUNS_LOCK:
+                    _RUNS[run_id].iterations_completed = len(payloads)
+                    current = _RUNS[run_id]
+            except Exception:
+                pass
         return current
 
     return router
@@ -348,6 +333,8 @@ def _execute_run(
     objective: str,
     initial_x: int,
     initial_y: int,
+    store: RunStore,
+    runs_dir: Path,
 ) -> None:
     """Background worker — runs one tournament loop, mutates _RUNS state."""
     try:
@@ -357,11 +344,9 @@ def _execute_run(
             data_summary,
             extract_python,
             history_summary,
-            load_history,
             load_pool_dataset,
             read_strategy,
             run_candidate,
-            save_experiment,
         )
         from asteroid_belt.data.adapters.base import TimeWindow
 
@@ -373,8 +358,13 @@ def _execute_run(
             end_ms=int(first_ts) + 7 * 24 * 60 * 60 * 1000,
         )
 
-        results_dir = Path("agent/results") / trial
-        results_dir.mkdir(parents=True, exist_ok=True)
+        ensure_agent_session(
+            store,
+            trial=trial,
+            pool_address=dataset.pool_key.address,
+            objective=objective,
+            budget=budget,
+        )
 
         prompt_path = Path(__file__).resolve().parents[1] / "agent" / "prompt.txt"
         system_prompt = prompt_path.read_text()
@@ -384,11 +374,22 @@ def _execute_run(
         }
 
         llm = LLMClient()
-        history = load_history(results_dir)
-        start_iter = max((int(h.get("iteration", 0)) for h in history), default=-1) + 1
+        history = list_iteration_payloads(store, trial=trial)
+        history_dicts = [
+            {
+                "iteration": p.iteration,
+                "score": p.score,
+                "score_metric": p.score_metric,
+                "primitives": p.primitives,
+                "rebalance_count": p.rebalance_count,
+                "error": p.error,
+            }
+            for p in history
+        ]
+        start_iter = max((p.iteration for p in history), default=-1) + 1
 
         for i in range(start_iter, start_iter + budget):
-            history_text = history_summary(history)
+            history_text = history_summary(history_dicts)
             user_parts = [
                 f"OBJECTIVE: maximize `{objective}`",
                 "",
@@ -419,11 +420,41 @@ def _execute_run(
                 selection_metric=objective,
                 iteration=i,
             )
-            path = save_experiment(result, results_dir=results_dir)
-            history.append(json.loads(path.read_text()))
+            now = int(time.time() * 1000)
+            record_agent_iteration(
+                store,
+                runs_dir=runs_dir,
+                trial=trial,
+                iteration=i,
+                code_hash=result.code_hash,
+                strategy_code=result.strategy_code,
+                pool_address=dataset.pool_key.address,
+                window_start=window.start_ms,
+                window_end=window.end_ms,
+                initial_x=initial_x,
+                initial_y=initial_y,
+                selection_metric=objective,
+                started_at=now,
+                ended_at=now,
+                status="error" if result.error else "ok",
+                score=None if result.error else result.score,
+                primitives=result.primitives if not result.error else None,
+                error_msg=result.error,
+                trajectory=result.trajectory,
+            )
+            history_dicts.append(
+                {
+                    "iteration": i,
+                    "score": result.score if not result.error else None,
+                    "score_metric": objective,
+                    "primitives": result.primitives,
+                    "rebalance_count": result.rebalance_count,
+                    "error": result.error,
+                }
+            )
 
             with _RUNS_LOCK:
-                _RUNS[run_id].iterations_completed = len(history)
+                _RUNS[run_id].iterations_completed = len(history_dicts)
 
         with _RUNS_LOCK:
             _RUNS[run_id].state = "done"

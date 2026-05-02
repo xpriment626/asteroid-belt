@@ -209,48 +209,6 @@ def run_candidate(
         )
 
 
-def save_experiment(result: ExperimentResult, *, results_dir: Path) -> Path:
-    """Persist one experiment as `<iter>_<hash>.json` (+ trajectory parquet if present)."""
-    results_dir.mkdir(parents=True, exist_ok=True)
-    base = results_dir / f"{result.iteration:04d}_{result.code_hash}"
-    path = base.with_suffix(".json")
-    payload = {
-        "iteration": result.iteration,
-        "timestamp": result.timestamp,
-        "code_hash": result.code_hash,
-        "score": result.score,
-        "score_metric": result.score_metric,
-        "primitives": result.primitives,
-        "rebalance_count": result.rebalance_count,
-        "error": result.error,
-        "strategy_code": result.strategy_code,
-        "has_trajectory": result.trajectory is not None and not result.trajectory.is_empty(),
-    }
-    path.write_text(json.dumps(payload, indent=2))
-    if result.trajectory is not None and not result.trajectory.is_empty():
-        result.trajectory.write_parquet(base.with_suffix(".parquet"))
-    return path
-
-
-def trajectory_path_for(results_dir: Path, *, iteration: int, code_hash: str) -> Path:
-    """Path where a saved iteration's trajectory parquet lives."""
-    return results_dir / f"{iteration:04d}_{code_hash}.parquet"
-
-
-def load_history(results_dir: Path) -> list[dict[str, Any]]:
-    """Load all prior experiments in iteration order."""
-    if not results_dir.exists():
-        return []
-    payloads: list[dict[str, Any]] = []
-    for p in sorted(results_dir.glob("*.json")):
-        try:
-            payloads.append(json.loads(p.read_text()))
-        except (json.JSONDecodeError, OSError):
-            continue
-    payloads.sort(key=lambda d: int(d.get("iteration", 0)))
-    return payloads
-
-
 def history_summary(history: list[dict[str, Any]], *, top_n: int = 5) -> str:
     """Compact text summary of best + most recent experiments for the prompt."""
     if not history:

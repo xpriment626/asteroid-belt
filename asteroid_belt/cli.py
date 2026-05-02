@@ -44,33 +44,47 @@ def ingest(pool: str, start: str, end: str, data_dir: str) -> None:
     click.echo(f"ingested {pool} for [{start}, {end}] -> {out_dir / pool}")
 
 
-@cli.command(name="agent-regen")
+@cli.command(name="agent-migrate")
 @click.option("--trial", required=True)
 @click.option("--pool", required=True)
+@click.option("--objective", default="vol_capture")
 @click.option("--data-dir", default="data", type=click.Path(exists=True))
+@click.option(
+    "--flat-results-root",
+    default="agent/results",
+    type=click.Path(),
+    help=(
+        "Path to legacy flat-file output (pre-DB migration). One-shot — once "
+        "migrated, future iterations write directly to the run store."
+    ),
+)
 @click.option("--initial-x", type=int, default=10_000_000_000)
 @click.option("--initial-y", type=int, default=1_000_000_000)
 @click.option("--window-start-ms", type=int, default=None)
 @click.option("--window-end-ms", type=int, default=None)
 @click.pass_context
-def agent_regen(
+def agent_migrate(
     ctx: click.Context,
     trial: str,
     pool: str,
+    objective: str,
     data_dir: str,
+    flat_results_root: str,
     initial_x: int,
     initial_y: int,
     window_start_ms: int | None,
     window_end_ms: int | None,
 ) -> None:
-    """Regenerate trajectory parquets for an existing trial."""
-    from asteroid_belt.agent.regen import main as regen_main
+    """One-shot: migrate a flat-file trial into the DuckDB store."""
+    from asteroid_belt.agent.migrate import main as migrate_main
 
     ctx.invoke(
-        regen_main,
+        migrate_main,
         trial=trial,
         pool=pool,
+        objective=objective,
         data_dir=data_dir,
+        flat_results_root=flat_results_root,
         initial_x=initial_x,
         initial_y=initial_y,
         window_start_ms=window_start_ms,

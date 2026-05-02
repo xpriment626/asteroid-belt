@@ -1,15 +1,15 @@
 """Tournament loop entry point.
 
-    uv run python -m asteroid_belt.agent.run \\
-        --pool BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y \\
-        --budget 20 \\
-        --objective vol_capture \\
-        --trial demo
+    uv run belt agent --pool BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y \\
+        --budget 20 --objective vol_capture --trial demo
+
+Writes through the DuckDB run store (see store.agent_runs). Resumes from
+existing iterations on the same trial automatically.
 """
 
 from __future__ import annotations
 
-import json
+import time
 from pathlib import Path
 
 import click
@@ -19,20 +19,23 @@ from asteroid_belt.agent.tools import (
     data_summary,
     extract_python,
     history_summary,
-    load_history,
     load_pool_dataset,
     read_strategy,
     run_candidate,
-    save_experiment,
 )
 from asteroid_belt.data.adapters.base import TimeWindow
 from asteroid_belt.metrics.primitives import (
     DEFAULT_SELECTION_METRIC,
     PRIMITIVE_REGISTRY,
 )
+from asteroid_belt.store.agent_runs import (
+    ensure_agent_session,
+    list_iteration_payloads,
+    open_default_store,
+    record_agent_iteration,
+)
 
 _PROMPT_PATH = Path(__file__).resolve().parent / "prompt.txt"
-_RESULTS_ROOT = Path("agent/results")
 
 
 def _build_user_prompt(
@@ -71,32 +74,12 @@ def _build_user_prompt(
     type=click.Choice(sorted(PRIMITIVE_REGISTRY.keys())),
     help="Scalar metric to climb",
 )
-@click.option("--trial", required=True, help="Trial name — used for results dir")
+@click.option("--trial", required=True, help="Trial name — used as session_id in the run store")
 @click.option("--data-dir", default="data", type=click.Path(exists=True), help="Root data dir")
-@click.option(
-    "--initial-x",
-    type=int,
-    default=10_000_000_000,  # 10 SOL
-    help="Initial X token raw amount",
-)
-@click.option(
-    "--initial-y",
-    type=int,
-    default=1_000_000_000,  # 1000 USDC
-    help="Initial Y token raw amount",
-)
-@click.option(
-    "--window-start-ms",
-    type=int,
-    default=None,
-    help="Backtest window start (ms epoch). Defaults to first 7 days of data.",
-)
-@click.option(
-    "--window-end-ms",
-    type=int,
-    default=None,
-    help="Backtest window end (ms epoch). Defaults to start + 7 days.",
-)
+@click.option("--initial-x", type=int, default=10_000_000_000, help="Initial X (raw)")
+@click.option("--initial-y", type=int, default=1_000_000_000, help="Initial Y (raw)")
+@click.option("--window-start-ms", type=int, default=None)
+@click.option("--window-end-ms", type=int, default=None)
 def main(
     pool: str,
     budget: int,
@@ -109,7 +92,8 @@ def main(
     window_end_ms: int | None,
 ) -> None:
     """Run the autoresearch tournament."""
-    pool_dir = Path(data_dir) / "pools" / pool
+    data_dir_path = Path(data_dir)
+    pool_dir = data_dir_path / "pools" / pool
     if not pool_dir.exists():
         raise click.ClickException(f"Pool dir not found: {pool_dir}")
 
@@ -125,8 +109,10 @@ def main(
         window_end_ms = window_end_ms or (window_start_ms + 7 * 24 * 60 * 60 * 1000)
     window = TimeWindow(start_ms=window_start_ms, end_ms=window_end_ms)
 
-    results_dir = _RESULTS_ROOT / trial
-    results_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = data_dir_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    store = open_default_store(data_dir_path)
+    ensure_agent_session(store, trial=trial, pool_address=pool, objective=objective, budget=budget)
 
     system_prompt = _PROMPT_PATH.read_text()
     worked_examples = {
@@ -138,20 +124,31 @@ def main(
 
     click.echo(f"Trial: {trial}  pool: {pool}  objective: {objective}  budget: {budget}")
     click.echo(f"Window: [{window.start_ms}, {window.end_ms}]")
-    click.echo(f"Results dir: {results_dir}")
+    click.echo(f"DB: {data_dir_path / 'asteroid_belt.duckdb'}")
 
-    history = load_history(results_dir)
-    start_iter = max((int(h.get("iteration", 0)) for h in history), default=-1) + 1
-    click.echo(f"Resuming from iteration {start_iter} ({len(history)} prior experiments)")
+    history_payloads = list_iteration_payloads(store, trial=trial)
+    history_dicts = [
+        {
+            "iteration": p.iteration,
+            "score": p.score,
+            "score_metric": p.score_metric,
+            "primitives": p.primitives,
+            "rebalance_count": p.rebalance_count,
+            "error": p.error,
+        }
+        for p in history_payloads
+    ]
+    start_iter = max((p.iteration for p in history_payloads), default=-1) + 1
+    click.echo(f"Resuming from iteration {start_iter} ({len(history_dicts)} prior experiments)")
 
     best_so_far = max(
-        (h.get("score", float("-inf")) for h in history if h.get("error") is None),
+        (p.score for p in history_payloads if p.error is None and p.score is not None),
         default=float("-inf"),
     )
 
     for i in range(start_iter, start_iter + budget):
         click.echo(f"\n=== Iteration {i} ===")
-        history_text = history_summary(history)
+        history_text = history_summary(history_dicts)
         user_prompt = _build_user_prompt(
             objective=objective,
             data_summary_text=data_summary(dataset, window),
@@ -173,8 +170,38 @@ def main(
             selection_metric=objective,
             iteration=i,
         )
-        path = save_experiment(result, results_dir=results_dir)
-        history.append(json.loads(path.read_text()))
+        now = int(time.time() * 1000)
+        record_agent_iteration(
+            store,
+            runs_dir=runs_dir,
+            trial=trial,
+            iteration=i,
+            code_hash=result.code_hash,
+            strategy_code=result.strategy_code,
+            pool_address=pool,
+            window_start=window.start_ms,
+            window_end=window.end_ms,
+            initial_x=initial_x,
+            initial_y=initial_y,
+            selection_metric=objective,
+            started_at=now,
+            ended_at=now,
+            status="error" if result.error else "ok",
+            score=None if result.error else result.score,
+            primitives=result.primitives if not result.error else None,
+            error_msg=result.error,
+            trajectory=result.trajectory,
+        )
+        history_dicts.append(
+            {
+                "iteration": i,
+                "score": result.score if not result.error else None,
+                "score_metric": objective,
+                "primitives": result.primitives,
+                "rebalance_count": result.rebalance_count,
+                "error": result.error,
+            }
+        )
 
         if result.error:
             click.echo(f"  ERROR: {result.error.splitlines()[0][:120]}")
@@ -187,7 +214,7 @@ def main(
                 f"rebalances={result.rebalance_count}{marker}"
             )
 
-    click.echo(f"\nDone. Best score: {best_so_far:.4f}  ({len(history)} total experiments)")
+    click.echo(f"\nDone. Best score: {best_so_far:.4f}  ({len(history_dicts)} total experiments)")
 
 
 if __name__ == "__main__":
