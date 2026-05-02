@@ -34,8 +34,8 @@ uv run belt ingest \
   --start 2025-12-01T00:00:00Z \
   --end 2026-04-30T00:00:00Z
 
-# 4. Launch the dev environment
-./launch.sh
+# 4. Launch the dev environment (backend + frontend in parallel)
+belt dev
 ```
 
 Open `http://localhost:5173` — you should see an empty trial list. Click
@@ -129,13 +129,18 @@ belt agent-migrate --trial smoke --pool BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJK
 
 ## Running the dev environment
 
-`./launch.sh` starts both the FastAPI backend (port 8000) and the SvelteKit
-dev server (port 5173) in parallel. Ctrl-C kills both.
+`belt dev` starts both the FastAPI backend (port 8000) and the SvelteKit dev
+server (port 5173) in parallel. Ctrl-C tears down both. If either process
+exits unexpectedly, the other is also stopped so you don't get orphans.
 
-If you've activated the venv (Option B or C above), `make dev` does the same
-thing using `npx concurrently`.
+```bash
+belt dev                                # both, default ports
+belt dev --api-port 8001 --web-port 5174  # custom ports
+belt dev --api-only                     # backend only
+```
 
-For a single process at a time:
+For finer-grained control (running each in its own terminal so you can
+read logs separately):
 ```bash
 uv run uvicorn asteroid_belt.server.app:app --reload   # backend only
 cd web && pnpm dev                                      # frontend only

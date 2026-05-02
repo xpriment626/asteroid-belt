@@ -93,6 +93,89 @@ def agent_migrate(
 
 
 @cli.command()
+@click.option("--api-port", type=int, default=8000, help="FastAPI backend port")
+@click.option("--web-port", type=int, default=5173, help="SvelteKit dev server port")
+@click.option("--api-only", is_flag=True, default=False, help="Skip the frontend")
+def dev(api_port: int, web_port: int, api_only: bool) -> None:
+    """Start the FastAPI backend + SvelteKit dev server side by side.
+
+    Ctrl-C cleanly tears down both. If either process exits unexpectedly,
+    the other is also stopped so you don't end up with orphans.
+    """
+    import shutil
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    web_dir = Path("web")
+    if not api_only:
+        if not web_dir.exists():
+            raise click.ClickException(f"Frontend directory not found: {web_dir}")
+        if not (web_dir / "node_modules").exists():
+            raise click.ClickException(
+                "web/node_modules is missing — run `cd web && pnpm install` first."
+            )
+        if shutil.which("pnpm") is None:
+            raise click.ClickException("pnpm not found on PATH. Install via `brew install pnpm`.")
+
+    procs: list[subprocess.Popen[bytes]] = []
+
+    click.echo(f"[api] starting on http://127.0.0.1:{api_port}")
+    procs.append(
+        subprocess.Popen(
+            [
+                "uvicorn",
+                "asteroid_belt.server.app:app",
+                "--reload",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(api_port),
+            ]
+        )
+    )
+
+    if not api_only:
+        click.echo(f"[web] starting on http://127.0.0.1:{web_port}")
+        procs.append(
+            subprocess.Popen(
+                ["pnpm", "dev", "--port", str(web_port)],
+                cwd=str(web_dir),
+            )
+        )
+
+    def shutdown(*_: object) -> None:
+        click.echo("\n[belt dev] shutting down…")
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+        deadline = time.time() + 5
+        for p in procs:
+            remaining = max(0.1, deadline - time.time())
+            try:
+                p.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    try:
+        while True:
+            for p in procs:
+                if p.poll() is not None:
+                    click.echo(
+                        f"[belt dev] subprocess exited with code {p.returncode}; tearing down."
+                    )
+                    shutdown()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        shutdown()
+
+
+@cli.command()
 @click.option("--pool", required=True)
 @click.option("--budget", type=int, default=10)
 @click.option("--objective", default="vol_capture")
