@@ -1,13 +1,23 @@
 const BASE = '/api/v1';
 
-export async function api<T>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`);
+// SvelteKit load functions must use `event.fetch` (not global fetch) so
+// relative URLs resolve under SSR. Browser-only callers can omit the arg —
+// global fetch is the default.
+export async function api<T>(
+  path: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<T> {
+  const r = await fetchFn(`${BASE}${path}`);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText} on ${path}`);
   return (await r.json()) as T;
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+export async function apiPost<T>(
+  path: string,
+  body: unknown,
+  fetchFn: typeof fetch = fetch,
+): Promise<T> {
+  const r = await fetchFn(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

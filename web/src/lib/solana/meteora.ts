@@ -1,15 +1,16 @@
 /**
  * Wraps @meteora-ag/dlmm just enough to open a position + add liquidity from
- * the browser. For the demo we only target one pool (DEVNET_POOL).
+ * the browser. The SDK + its @coral-xyz/anchor transitive dep have CJS-style
+ * directory imports that Node's ESM resolver rejects during SSR, so we lazy-
+ * load via dynamic import() — keeps the SDK out of the SSR import graph.
  */
 
-import DLMM, { StrategyType } from '@meteora-ag/dlmm';
-import {
-  Keypair,
+import type {
+  Keypair as KeypairT,
   PublicKey,
   Transaction,
 } from '@solana/web3.js';
-import BN from 'bn.js';
+import type BN from 'bn.js';
 import { DEVNET_POOL, getConnection } from './devnet';
 
 export type PoolSnapshot = {
@@ -23,26 +24,41 @@ export type PoolSnapshot = {
   tokenYSymbol: string;
 };
 
-let _dlmmInstance: DLMM | null = null;
+// Cached at module scope so we only load the SDK + initialize once per session.
+let _dlmmInstance: unknown = null;
 
-async function getDlmm(): Promise<DLMM> {
-  if (_dlmmInstance) return _dlmmInstance;
-  const connection = getConnection();
-  // SDK accepts (connection, poolPubkey, opts?). Cast the type because the
-  // SDK's public d.ts is loose.
-  _dlmmInstance = await DLMM.create(connection, DEVNET_POOL);
-  return _dlmmInstance;
+async function getDlmm(): Promise<{
+  dlmm: unknown;
+  StrategyType: { Spot: number; Curve: number; BidAsk: number };
+}> {
+  // dynamic import — never resolved during SSR
+  const mod = await import('@meteora-ag/dlmm');
+  // ESM/CJS interop: the default export is the DLMM class
+  const DLMM = (mod as { default: unknown }).default ?? mod;
+  if (!_dlmmInstance) {
+    const connection = getConnection();
+    // @ts-expect-error — DLMM is loaded dynamically; cast at call site
+    _dlmmInstance = await DLMM.create(connection, DEVNET_POOL);
+  }
+  return {
+    dlmm: _dlmmInstance,
+    StrategyType: (mod as unknown as { StrategyType: { Spot: number; Curve: number; BidAsk: number } }).StrategyType,
+  };
 }
 
 export async function fetchPoolSnapshot(): Promise<PoolSnapshot> {
-  const d = await getDlmm();
-  const active = await d.getActiveBin();
-  // The SDK exposes mint pubkeys + decimals on `tokenX` / `tokenY` accessors.
-  const tx = d.tokenX;
-  const ty = d.tokenY;
+  const { dlmm } = await getDlmm();
+  // @ts-expect-error — dynamic types
+  const active = await dlmm.getActiveBin();
+  // @ts-expect-error
+  const tx = dlmm.tokenX;
+  // @ts-expect-error
+  const ty = dlmm.tokenY;
+  // @ts-expect-error
+  const lbPair = dlmm.lbPair;
   return {
     activeBin: active.binId,
-    binStep: d.lbPair.binStep,
+    binStep: lbPair.binStep,
     tokenXMint: tx.publicKey.toString(),
     tokenYMint: ty.publicKey.toString(),
     tokenXDecimals: tx.mint.decimals,
@@ -52,7 +68,10 @@ export async function fetchPoolSnapshot(): Promise<PoolSnapshot> {
   };
 }
 
-function strategyTypeFor(distribution: string): StrategyType {
+function strategyEnumFor(
+  StrategyType: { Spot: number; Curve: number; BidAsk: number },
+  distribution: string,
+): number {
   switch (distribution) {
     case 'curve':
       return StrategyType.Curve;
@@ -76,12 +95,16 @@ export async function buildOpenAndAddLiquidityTx(args: {
   distribution: string;
   amountX: BN; // raw token units
   amountY: BN;
-}): Promise<{ tx: Transaction; positionKeypair: Keypair }> {
-  const d = await getDlmm();
+}): Promise<{ tx: Transaction; positionKeypair: KeypairT }> {
+  const { dlmm, StrategyType } = await getDlmm();
+  // Lazy-load Keypair too so we don't have to import @solana/web3.js as a
+  // value at module scope (it's lighter than DLMM but consistency is nice).
+  const { Keypair } = await import('@solana/web3.js');
   const positionKeypair = Keypair.generate();
-  const strategy = strategyTypeFor(args.distribution);
+  const strategy = strategyEnumFor(StrategyType, args.distribution);
 
-  const tx = await d.initializePositionAndAddLiquidityByStrategy({
+  // @ts-expect-error — dynamic types
+  const tx: Transaction = await dlmm.initializePositionAndAddLiquidityByStrategy({
     positionPubKey: positionKeypair.publicKey,
     user: args.user,
     totalXAmount: args.amountX,
