@@ -2,7 +2,7 @@
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { api, apiPost, type PoolSummary, type RunStatus } from '$lib/api/client';
-  import { X, Play } from 'lucide-svelte';
+  import { X, Play, Square } from 'lucide-svelte';
 
   const dispatch = createEventDispatcher();
 
@@ -43,7 +43,7 @@
     }
     try {
       status = await apiPost<RunStatus>('/runs/start', { pool, trial, budget, objective });
-      pollInterval = setInterval(poll, 2000);
+      pollInterval = setInterval(poll, 5000);
     } catch (e) {
       err = String(e);
     }
@@ -54,7 +54,7 @@
     try {
       const next = await api<RunStatus>(`/runs/${status.run_id}`);
       status = next;
-      if (next.state === 'done' || next.state === 'failed') {
+      if (next.state === 'done' || next.state === 'failed' || next.state === 'cancelled') {
         if (pollInterval) clearInterval(pollInterval);
         pollInterval = null;
         if (next.state === 'done') {
@@ -62,6 +62,21 @@
           dispatch('close');
         }
       }
+    } catch (e) {
+      const msg = String(e);
+      err = msg;
+      if (msg.includes('404')) {
+        if (pollInterval) clearInterval(pollInterval);
+        pollInterval = null;
+        err = 'Run vanished from server (likely an API restart). Iterations completed before the restart are still in the trial.';
+      }
+    }
+  }
+
+  async function cancel() {
+    if (!status) return;
+    try {
+      status = await apiPost<RunStatus>(`/runs/${status.run_id}/cancel`, {});
     } catch (e) {
       err = String(e);
     }
@@ -153,8 +168,13 @@
           <div class="text-xs text-fg-muted">Run id</div>
           <div class="font-mono text-xs">{status.run_id}</div>
           <div class="mt-2 text-xs text-fg-muted">State</div>
-          <div class={status.state === 'failed' ? 'text-rose-400' : status.state === 'done' ? 'text-emerald-400' : 'text-amber-400'}>
-            {status.state}
+          <div class={
+            status.state === 'failed' ? 'text-rose-400'
+            : status.state === 'done' ? 'text-emerald-400'
+            : status.state === 'cancelled' ? 'text-fg-muted'
+            : 'text-amber-400'
+          }>
+            {status.state}{status.cancel_requested && status.state === 'running' ? ' (cancelling…)' : ''}
           </div>
           <div class="mt-2 text-xs text-fg-muted">Progress</div>
           <div class="font-mono text-xs">{status.iterations_completed} / {status.budget}</div>
@@ -169,7 +189,13 @@
           You can close this dialog — the run will keep going. Visit <code>/trials/{status.trial}</code>
           to watch progress.
         </p>
-        <div class="flex justify-end">
+        <div class="flex justify-end gap-2">
+          {#if status.state === 'running' && !status.cancel_requested}
+            <button on:click={cancel}
+              class="flex items-center gap-1.5 rounded border border-rose-500/40 px-3 py-1.5 text-xs text-rose-300 hover:bg-rose-500/10">
+              <Square size={12} /> Cancel run
+            </button>
+          {/if}
           <button on:click={close} class="rounded px-3 py-1.5 text-xs text-fg-muted hover:text-fg">
             Close
           </button>

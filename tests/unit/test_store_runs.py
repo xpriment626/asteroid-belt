@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 
 from asteroid_belt.store.runs import (
+    ArtifactRecord,
     DuckDBRunStore,
     RunRecord,
+    SessionRecord,
 )
 
 
@@ -101,3 +103,56 @@ def test_dedup_check_by_config_hash(store: DuckDBRunStore) -> None:
     assert existing.run_id == "run_a"
     missing = store.find_by_config_hash("nonexistent")
     assert missing is None
+
+
+def test_delete_session_cascade_clears_runs_artifacts_and_session(
+    store: DuckDBRunStore,
+) -> None:
+    store.insert_session(
+        SessionRecord(
+            session_id="sess_x",
+            label="x",
+            created_at=1,
+            closed_at=None,
+            session_kind="agent",
+        )
+    )
+    store.insert_session(
+        SessionRecord(
+            session_id="sess_y",
+            label="y",
+            created_at=2,
+            closed_at=None,
+            session_kind="agent",
+        )
+    )
+    rec_x1 = RunRecord(**{**_record("run_x1").__dict__, "session_id": "sess_x"})
+    rec_x2 = RunRecord(**{**_record("run_x2").__dict__, "session_id": "sess_x"})
+    rec_y1 = RunRecord(**{**_record("run_y1").__dict__, "session_id": "sess_y"})
+    store.insert(rec_x1)
+    store.insert(rec_x2)
+    store.insert(rec_y1)
+    store.insert_artifact(ArtifactRecord(run_id="run_x1", kind="source_code", path="/x1.py"))
+    store.insert_artifact(ArtifactRecord(run_id="run_x2", kind="source_code", path="/x2.py"))
+    store.insert_artifact(ArtifactRecord(run_id="run_y1", kind="source_code", path="/y1.py"))
+
+    deleted = store.delete_session_cascade("sess_x")
+    assert deleted == 2
+
+    # sess_x rows gone, sess_y intact.
+    assert store.list_sessions(kind="agent") == [
+        s for s in store.list_sessions(kind="agent") if s.session_id == "sess_y"
+    ]
+    with pytest.raises(KeyError):
+        store.get("run_x1")
+    with pytest.raises(KeyError):
+        store.get("run_x2")
+    assert store.get("run_y1").run_id == "run_y1"
+    assert store.query_artifacts("run_x1") == []
+    assert store.query_artifacts("run_x2") == []
+    assert len(store.query_artifacts("run_y1")) == 1
+
+
+def test_delete_session_cascade_unknown_session_raises(store: DuckDBRunStore) -> None:
+    with pytest.raises(KeyError):
+        store.delete_session_cascade("nope")

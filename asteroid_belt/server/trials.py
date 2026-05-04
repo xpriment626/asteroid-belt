@@ -37,6 +37,9 @@ from asteroid_belt.store.agent_runs import (
     list_iteration_payloads,
     record_agent_iteration,
 )
+from asteroid_belt.store.agent_runs import (
+    delete_trial as delete_agent_trial,
+)
 from asteroid_belt.store.runs import RunStore
 
 # In-process store of currently-active runs. Keyed by run_id; values are
@@ -132,6 +135,28 @@ def build_router(*, store: RunStore, data_dir: Path, runs_dir: Path) -> APIRoute
         summary = _summarize_trial(trial, payloads)
         iterations = [_to_iteration_summary(p) for p in payloads]
         return TrialDetail(**summary.model_dump(), iterations=iterations)
+
+    @router.delete("/trials/{trial}", status_code=204)
+    def delete_trial_endpoint(trial: str) -> None:
+        # Refuse if a tournament for this trial is still running in-process.
+        with _RUNS_LOCK:
+            active = [r for r in _RUNS.values() if r.trial == trial and r.state == "running"]
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"trial {trial} has an active run; cancel it before deleting",
+            )
+        try:
+            delete_agent_trial(store, trial=trial, runs_dir=runs_dir)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
+        # Drop any terminal (done/failed/cancelled) RunStatus rows for this trial
+        # so the in-memory state doesn't outlive the DB rows.
+        with _RUNS_LOCK:
+            stale = [rid for rid, r in _RUNS.items() if r.trial == trial]
+            for rid in stale:
+                _RUNS.pop(rid, None)
+        return None
 
     @router.get("/trials/{trial}/iterations/{iteration}", response_model=IterationDetail)
     def get_iteration(trial: str, iteration: int) -> IterationDetail:
@@ -321,6 +346,18 @@ def build_router(*, store: RunStore, data_dir: Path, runs_dir: Path) -> APIRoute
                 pass
         return current
 
+    @router.post("/runs/{run_id}/cancel", response_model=RunStatus)
+    def cancel_run(run_id: str) -> RunStatus:
+        with _RUNS_LOCK:
+            current = _RUNS.get(run_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+            # Idempotent on terminal states — return current status unchanged.
+            if current.state == "running":
+                _RUNS[run_id].cancel_requested = True
+                current = _RUNS[run_id]
+        return current
+
     return router
 
 
@@ -389,6 +426,11 @@ def _execute_run(
         start_iter = max((p.iteration for p in history), default=-1) + 1
 
         for i in range(start_iter, start_iter + budget):
+            with _RUNS_LOCK:
+                if _RUNS[run_id].cancel_requested:
+                    _RUNS[run_id].state = "cancelled"
+                    _RUNS[run_id].ended_at = int(time.time() * 1000)
+                    return
             history_text = history_summary(history_dicts)
             user_parts = [
                 f"OBJECTIVE: maximize `{objective}`",

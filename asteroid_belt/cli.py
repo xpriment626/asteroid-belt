@@ -128,6 +128,12 @@ def dev(api_port: int, web_port: int, api_only: bool) -> None:
                 "uvicorn",
                 "asteroid_belt.server.app:app",
                 "--reload",
+                # Narrow the reload watch to Python source. Without this, uvicorn
+                # watches the whole CWD and reloads when the worker writes
+                # data/runs/<id>/strategy.py — which kills BackgroundTasks
+                # mid-tournament and wipes the in-memory _RUNS dict.
+                "--reload-dir",
+                "asteroid_belt",
                 "--host",
                 "127.0.0.1",
                 "--port",

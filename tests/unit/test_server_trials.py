@@ -226,6 +226,63 @@ def test_404s(tmp_path: Path) -> None:
     assert c.get("/api/v1/trials/missing/iterations/0/trajectory").status_code == 404
 
 
+def test_delete_trial_removes_db_rows_and_disk_files(tmp_path: Path) -> None:
+    c, store = _setup(tmp_path)
+    runs_dir = tmp_path / "data" / "runs"
+    ensure_agent_session(
+        store, trial="demo", pool_address="pool_x", objective="vol_capture", budget=2
+    )
+    _seed_iteration(
+        store,
+        runs_dir,
+        trial="demo",
+        iteration=0,
+        code_hash="d0",
+        score=100.0,
+        error=None,
+        has_trajectory=True,
+    )
+    _seed_iteration(
+        store,
+        runs_dir,
+        trial="demo",
+        iteration=1,
+        code_hash="d1",
+        score=200.0,
+        error=None,
+        has_trajectory=True,
+    )
+    iter0_dir = runs_dir / "agent_demo_0000"
+    iter1_dir = runs_dir / "agent_demo_0001"
+    assert iter0_dir.is_dir() and iter1_dir.is_dir()
+
+    r = c.delete("/api/v1/trials/demo")
+    assert r.status_code == 204
+
+    # Trial gone from DB.
+    assert c.get("/api/v1/trials/demo").status_code == 404
+    assert c.get("/api/v1/trials").json() == []
+    # Per-run dirs cleaned up.
+    assert not iter0_dir.exists()
+    assert not iter1_dir.exists()
+
+
+def test_delete_trial_returns_404_for_unknown(tmp_path: Path) -> None:
+    c, _ = _setup(tmp_path)
+    assert c.delete("/api/v1/trials/never-existed").status_code == 404
+
+
+def test_delete_trial_with_zero_iterations(tmp_path: Path) -> None:
+    """Session exists but no runs ever recorded — should still delete cleanly."""
+    c, store = _setup(tmp_path)
+    ensure_agent_session(
+        store, trial="empty", pool_address="pool_x", objective="vol_capture", budget=5
+    )
+    r = c.delete("/api/v1/trials/empty")
+    assert r.status_code == 204
+    assert c.get("/api/v1/trials/empty").status_code == 404
+
+
 _OPEN_30_CURVE_CODE = """
 class MyStrategy(Strategy):
     def initialize(self, pool, capital):

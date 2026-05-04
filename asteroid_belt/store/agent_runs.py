@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -261,6 +262,29 @@ def get_iteration_trajectory(store: RunStore, *, trial: str, iteration: int) -> 
         if a.kind == TRAJECTORY_KIND:
             return pl.read_parquet(a.path)
     return None
+
+
+def delete_trial(store: RunStore, *, trial: str, runs_dir: Path) -> int:
+    """Delete an agent trial: cascade DB rows + remove on-disk run dirs.
+
+    Order: collect run_ids first (we'll need them for filesystem cleanup)
+    → cascade-delete in DB → rmtree on-disk dirs. DB-first means a partial
+    failure leaves files orphaned (recoverable) rather than DB rows pointing
+    at nothing (data loss). Raises KeyError if the trial does not exist.
+    """
+    runs = list_iterations(store, trial=trial)
+    deleted = store.delete_session_cascade(trial)
+    for run in runs:
+        run_dir = runs_dir / run.run_id
+        # Defense-in-depth: the runs_dir is supplied by the caller, but make
+        # sure we never try to remove a path that escapes it.
+        try:
+            run_dir.resolve().relative_to(runs_dir.resolve())
+        except ValueError:
+            continue
+        if run_dir.is_dir():
+            shutil.rmtree(run_dir, ignore_errors=True)
+    return deleted
 
 
 def default_db_path(data_dir: Path) -> Path:

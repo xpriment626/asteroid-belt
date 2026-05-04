@@ -113,12 +113,13 @@ class RunStartRequest(BaseModel):
 class RunStatus(BaseModel):
     run_id: str
     trial: str
-    state: str  # "running" | "done" | "failed"
+    state: str  # "running" | "done" | "failed" | "cancelled"
     iterations_completed: int
     budget: int
     started_at: int
     ended_at: int | None
     error: str | None
+    cancel_requested: bool = False
 
 
 class BuildActionRequest(BaseModel):

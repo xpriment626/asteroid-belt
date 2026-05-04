@@ -26,6 +26,23 @@ export async function apiPost<T>(
   return (await r.json()) as T;
 }
 
+export async function apiDelete(
+  path: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<void> {
+  const r = await fetchFn(`${BASE}${path}`, { method: 'DELETE' });
+  if (!r.ok) {
+    let detail = '';
+    try {
+      const body = (await r.json()) as { detail?: string };
+      if (body && typeof body.detail === 'string') detail = `: ${body.detail}`;
+    } catch {
+      // Body might be empty or non-JSON on 204/some 4xx — ignore.
+    }
+    throw new Error(`${r.status} ${r.statusText} on DELETE ${path}${detail}`);
+  }
+}
+
 export type PoolSummary = {
   address: string;
   name: string | null;
@@ -106,12 +123,13 @@ export type TrajectoryRow = {
 export type RunStatus = {
   run_id: string;
   trial: string;
-  state: 'running' | 'done' | 'failed';
+  state: 'running' | 'done' | 'failed' | 'cancelled';
   iterations_completed: number;
   budget: number;
   started_at: number;
   ended_at: number | null;
   error: string | null;
+  cancel_requested: boolean;
 };
 
 export type RunStartRequest = {

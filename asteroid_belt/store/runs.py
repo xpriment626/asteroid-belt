@@ -89,6 +89,7 @@ class RunStore(Protocol):
     def list_sessions(self, *, kind: str | None = None) -> list[SessionRecord]: ...
     def insert_artifact(self, artifact: ArtifactRecord) -> None: ...
     def query_artifacts(self, run_id: str) -> list[ArtifactRecord]: ...
+    def delete_session_cascade(self, session_id: str) -> int: ...
 
 
 class DuckDBRunStore:
@@ -296,6 +297,34 @@ class DuckDBRunStore:
         return [
             ArtifactRecord(run_id=r[0], kind=r[1], path=r[2], sha256=r[3], bytes=r[4]) for r in rows
         ]
+
+    def delete_session_cascade(self, session_id: str) -> int:
+        """Delete a session, all its runs, and all artifacts.
+
+        Returns the number of runs deleted. Order respects FKs:
+        run_artifacts → runs → sessions. DuckDB checks FK constraints
+        immediately per-statement (not deferred to COMMIT), so each delete
+        auto-commits — wrapping in BEGIN TRANSACTION makes the previous
+        statement's deletions invisible to the next statement's FK check.
+        Raises KeyError if the session doesn't exist.
+        """
+        existing = self._con.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", [session_id]
+        ).fetchone()
+        if existing is None:
+            raise KeyError(session_id)
+        count_row = self._con.execute(
+            "SELECT COUNT(*) FROM runs WHERE session_id = ?", [session_id]
+        ).fetchone()
+        run_count = int(count_row[0]) if count_row is not None else 0
+        self._con.execute(
+            "DELETE FROM run_artifacts WHERE run_id IN "
+            "(SELECT run_id FROM runs WHERE session_id = ?)",
+            [session_id],
+        )
+        self._con.execute("DELETE FROM runs WHERE session_id = ?", [session_id])
+        self._con.execute("DELETE FROM sessions WHERE session_id = ?", [session_id])
+        return run_count
 
     @staticmethod
     def _row_to_session(row: tuple[Any, ...]) -> SessionRecord:

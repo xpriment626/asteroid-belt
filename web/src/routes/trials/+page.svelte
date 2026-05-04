@@ -1,14 +1,37 @@
 <script lang="ts">
-  import { Plus, Beaker } from 'lucide-svelte';
+  import { Plus, Beaker, Trash2 } from 'lucide-svelte';
+  import { invalidateAll } from '$app/navigation';
   import NewRunModal from '$lib/components/NewRunModal.svelte';
+  import { apiDelete } from '$lib/api/client';
   import type { PageData } from './$types';
 
   export let data: PageData;
   let showModal = false;
+  let deleting: string | null = null;
+  let deleteError: string | null = null;
 
   function fmtTimestamp(ms: number | null): string {
     if (ms === null) return '—';
     return new Date(ms).toLocaleString();
+  }
+
+  async function deleteTrial(trial: string, iterationCount: number) {
+    const ok = confirm(
+      `Delete trial "${trial}" and all ${iterationCount} iterations? `
+        + `Strategy code and trajectory files will be removed from disk. `
+        + `This cannot be undone.`,
+    );
+    if (!ok) return;
+    deleting = trial;
+    deleteError = null;
+    try {
+      await apiDelete(`/trials/${encodeURIComponent(trial)}`);
+      await invalidateAll();
+    } catch (e) {
+      deleteError = String(e);
+    } finally {
+      deleting = null;
+    }
   }
 </script>
 
@@ -37,6 +60,11 @@
     </p>
   </div>
 {:else}
+  {#if deleteError}
+    <p class="mb-3 rounded border border-rose-500/40 bg-rose-500/5 p-2 text-xs text-rose-300">
+      {deleteError}
+    </p>
+  {/if}
   <table class="w-full text-sm">
     <thead class="border-b border-bg-muted text-left text-xs text-fg-muted">
       <tr>
@@ -46,6 +74,7 @@
         <th class="py-2 pr-4 font-medium">Best score</th>
         <th class="py-2 pr-4 font-medium">Objective</th>
         <th class="py-2 pr-4 font-medium">Last update</th>
+        <th class="py-2 font-medium"></th>
       </tr>
     </thead>
     <tbody>
@@ -74,6 +103,17 @@
           </td>
           <td class="py-3 pr-4 text-xs text-fg-muted">{t.score_metric ?? '—'}</td>
           <td class="py-3 pr-4 text-xs text-fg-muted">{fmtTimestamp(t.last_updated)}</td>
+          <td class="py-3 text-right">
+            <button
+              on:click={() => deleteTrial(t.trial, t.iteration_count)}
+              disabled={deleting === t.trial}
+              title="Delete trial"
+              aria-label={`Delete trial ${t.trial}`}
+              class="rounded p-1.5 text-fg-muted hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-40"
+            >
+              <Trash2 size={14} />
+            </button>
+          </td>
         </tr>
       {/each}
     </tbody>
