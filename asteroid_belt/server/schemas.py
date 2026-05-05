@@ -66,6 +66,11 @@ class TrialSummary(BaseModel):
     score_metric: str | None
     started_at: int | None  # ms epoch of earliest iteration
     last_updated: int | None  # ms epoch of latest iteration
+    # Total iterations the agent was asked to run. Pulled from the session's
+    # goal_json. None when the trial pre-dates the session goal contract or
+    # was migrated from flat files. Frontend uses (iteration_count >= budget)
+    # as the "trial is complete, stop polling" signal.
+    budget: int | None
 
 
 class TrialDetail(TrialSummary):

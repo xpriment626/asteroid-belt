@@ -77,6 +77,7 @@ export type TrialSummary = {
   score_metric: string | null;
   started_at: number | null;
   last_updated: number | null;
+  budget: number | null;
 };
 
 export type IterationSummary = {

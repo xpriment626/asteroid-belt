@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, type IterationDetail, type IterationSummary, type TrajectoryRow } from '$lib/api/client';
+  import { onMount, onDestroy } from 'svelte';
+  import { invalidateAll } from '$app/navigation';
+  import { api, type IterationDetail, type IterationSummary, type TrajectoryRow, type TrialDetail } from '$lib/api/client';
   import EquityChart from '$lib/components/EquityChart.svelte';
   import IterationLeaderboard from '$lib/components/IterationLeaderboard.svelte';
   import DeployModal from '$lib/components/DeployModal.svelte';
@@ -8,14 +10,69 @@
 
   export let data: PageData;
 
-  // Selection: default to best iteration, or iteration 0 if none.
-  let selectedIter: number =
-    data.trial.best_iteration ?? data.trial.iterations[0]?.iteration ?? 0;
+  // Trial may have zero iterations if the user just clicked Start and the
+  // first iter hasn't landed yet. Pick a sentinel and skip auto-load in that
+  // case so we don't 404.
+  let selectedIter: number | null =
+    data.trial.best_iteration ?? data.trial.iterations[0]?.iteration ?? null;
 
   let detail: IterationDetail | null = null;
   let trajectory: TrajectoryRow[] = [];
   let detailErr: string | null = null;
   let showDeploy = false;
+
+  // Auto-refresh: poll the trial summary; when iteration_count grows,
+  // invalidate so the load function re-fetches the leaderboard. Stops
+  // once iteration_count >= budget so completed trials don't churn the
+  // network forever. If budget is null (migrated trial / no session
+  // goal_json), polls for the lifetime of the page — browsers throttle
+  // setInterval when the tab is hidden.
+  const POLL_MS = 5000;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let lastIterCount = data.trial.iteration_count;
+
+  function trialIsComplete(t: TrialDetail): boolean {
+    return t.budget !== null && t.iteration_count >= t.budget;
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function checkForNewIterations() {
+    try {
+      const fresh = await api<TrialDetail>(`/trials/${data.trial.trial}`);
+      if (fresh.iteration_count > lastIterCount) {
+        lastIterCount = fresh.iteration_count;
+        await invalidateAll();
+      }
+      if (trialIsComplete(fresh)) stopPolling();
+    } catch {
+      // Transient network errors shouldn't kill the watcher.
+    }
+  }
+
+  onMount(() => {
+    // Skip polling entirely if the trial is already complete on first load.
+    if (!trialIsComplete(data.trial)) {
+      pollTimer = setInterval(checkForNewIterations, POLL_MS);
+    }
+  });
+
+  onDestroy(stopPolling);
+
+  // If the trial transitioned from pending (0 iters) to having iterations,
+  // pick a default selection so the detail panel populates without a click.
+  $: if (selectedIter === null && data.trial.iterations.length > 0) {
+    selectedIter = data.trial.best_iteration ?? data.trial.iterations[0].iteration;
+  }
+  // Keep the stagnant-counter baseline in sync after invalidateAll re-runs load.
+  $: if (data.trial.iteration_count > lastIterCount) {
+    lastIterCount = data.trial.iteration_count;
+  }
 
   async function loadIter(n: number) {
     detail = null;
@@ -33,7 +90,7 @@
     }
   }
 
-  $: if (selectedIter !== undefined) loadIter(selectedIter);
+  $: if (selectedIter !== null) loadIter(selectedIter);
 
   function classifyIter(it: IterationSummary): 'error' | 'degenerate' | 'ok' {
     if (it.error) return 'error';
@@ -71,12 +128,20 @@
   <h3 class="mb-2 text-xs font-medium text-fg-muted">Leaderboard / iteration timeline</h3>
   <IterationLeaderboard
     iterations={data.trial.iterations}
-    selected={selectedIter}
+    selected={selectedIter ?? 0}
     on:select={(e) => (selectedIter = e.detail)}
   />
 </div>
 
-{#if detailErr}
+{#if data.trial.iterations.length === 0}
+  <div class="rounded border border-bg-muted bg-bg-muted/20 p-6 text-center">
+    <p class="text-sm text-fg-muted">Trial pending — first iteration hasn't landed yet.</p>
+    <p class="mt-2 text-xs text-fg-dim">
+      Refresh the page in a minute or two; iterations will appear in the leaderboard above as they
+      complete. Each iteration takes ~30–60s on DeepSeek V4.
+    </p>
+  </div>
+{:else if detailErr}
   <div class="rounded border border-rose-500/40 bg-rose-500/5 p-3 text-xs text-rose-300">
     Failed to load iteration: {detailErr}
   </div>

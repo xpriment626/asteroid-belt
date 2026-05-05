@@ -121,5 +121,13 @@
 {/if}
 
 {#if showModal}
-  <NewRunModal on:close={() => (showModal = false)} />
+  <NewRunModal
+    on:close={async () => {
+      showModal = false;
+      // The new trial appears in the DB as soon as the worker calls
+      // ensure_agent_session() — invalidate so the list reflects it without
+      // a manual refresh.
+      await invalidateAll();
+    }}
+  />
 {/if}

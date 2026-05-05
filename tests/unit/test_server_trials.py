@@ -142,6 +142,8 @@ def test_list_trials_summarizes_counts(tmp_path: Path) -> None:
     assert s["degenerate_count"] == 1
     assert s["best_iteration"] == 3
     assert s["best_score"] == 200.0
+    # Budget surfaces from session.goal_json (set via ensure_agent_session).
+    assert s["budget"] == 4
 
 
 def test_get_trial_returns_leaderboard(tmp_path: Path) -> None:
@@ -270,6 +272,35 @@ def test_delete_trial_removes_db_rows_and_disk_files(tmp_path: Path) -> None:
 def test_delete_trial_returns_404_for_unknown(tmp_path: Path) -> None:
     c, _ = _setup(tmp_path)
     assert c.delete("/api/v1/trials/never-existed").status_code == 404
+
+
+def test_trial_budget_null_when_session_has_no_goal_json(tmp_path: Path) -> None:
+    """Sessions migrated from flat files won't have goal_json; budget must be None."""
+    from asteroid_belt.store.runs import SessionRecord
+
+    c, store = _setup(tmp_path)
+    runs_dir = tmp_path / "data" / "runs"
+    store.insert_session(
+        SessionRecord(
+            session_id="legacy",
+            label="legacy",
+            created_at=1,
+            closed_at=None,
+            session_kind="agent",
+            goal_json=None,
+        )
+    )
+    _seed_iteration(
+        store,
+        runs_dir,
+        trial="legacy",
+        iteration=0,
+        code_hash="x",
+        score=10.0,
+        error=None,
+    )
+    s = c.get("/api/v1/trials/legacy").json()
+    assert s["budget"] is None
 
 
 def test_delete_trial_with_zero_iterations(tmp_path: Path) -> None:

@@ -40,7 +40,7 @@ from asteroid_belt.store.agent_runs import (
 from asteroid_belt.store.agent_runs import (
     delete_trial as delete_agent_trial,
 )
-from asteroid_belt.store.runs import RunStore
+from asteroid_belt.store.runs import RunStore, SessionRecord
 
 # In-process store of currently-active runs. Keyed by run_id; values are
 # RunStatus dataclasses we mutate on the worker thread. Demo-grade — v2
@@ -70,7 +70,19 @@ def _safe_score(raw: Any) -> float | None:
     return v
 
 
-def _summarize_trial(trial: str, payloads: list[AgentIterationPayload]) -> TrialSummary:
+def _budget_from_session(session: SessionRecord) -> int | None:
+    """Pull `budget` out of the session's goal_json. Resilient to missing keys
+    or non-int values (returns None) so migrated / hand-crafted sessions don't
+    break the trials list."""
+    goal = session.goal_json or {}
+    raw = goal.get("budget")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_trial(session: SessionRecord, payloads: list[AgentIterationPayload]) -> TrialSummary:
     iteration_count = len(payloads)
     success = [p for p in payloads if p.error is None]
     errors = [p for p in payloads if p.error is not None]
@@ -80,7 +92,7 @@ def _summarize_trial(trial: str, payloads: list[AgentIterationPayload]) -> Trial
         best = max(success, key=lambda p: p.score if p.score is not None else float("-inf"))
     timestamps = [p.timestamp for p in payloads if p.timestamp]
     return TrialSummary(
-        trial=trial,
+        trial=session.session_id,
         iteration_count=iteration_count,
         success_count=len(success),
         error_count=len(errors),
@@ -90,6 +102,7 @@ def _summarize_trial(trial: str, payloads: list[AgentIterationPayload]) -> Trial
         score_metric=best.score_metric if best else None,
         started_at=min(timestamps) if timestamps else None,
         last_updated=max(timestamps) if timestamps else None,
+        budget=_budget_from_session(session),
     )
 
 
@@ -120,7 +133,7 @@ def build_router(*, store: RunStore, data_dir: Path, runs_dir: Path) -> APIRoute
         out: list[TrialSummary] = []
         for sess in list_agent_trials(store):
             payloads = list_iteration_payloads(store, trial=sess.session_id)
-            out.append(_summarize_trial(sess.session_id, payloads))
+            out.append(_summarize_trial(sess, payloads))
         # Most-recently-touched trials first.
         out.sort(key=lambda s: s.last_updated or 0, reverse=True)
         return out
@@ -128,11 +141,11 @@ def build_router(*, store: RunStore, data_dir: Path, runs_dir: Path) -> APIRoute
     @router.get("/trials/{trial}", response_model=TrialDetail)
     def get_trial(trial: str) -> TrialDetail:
         try:
-            store.get_session(trial)
+            session = store.get_session(trial)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=f"trial {trial} not found") from e
         payloads = list_iteration_payloads(store, trial=trial)
-        summary = _summarize_trial(trial, payloads)
+        summary = _summarize_trial(session, payloads)
         iterations = [_to_iteration_summary(p) for p in payloads]
         return TrialDetail(**summary.model_dump(), iterations=iterations)
 
